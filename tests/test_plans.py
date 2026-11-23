@@ -223,6 +223,9 @@ class ConvertTest(unittest.TestCase):
         self.assertNotIn("isActive", ip.clone_input(SAMPLE, name="TEST HAPUS 23-11", draft=True))
         self.assertIn("isActive", ip.clone_input(SAMPLE, name="TEST HAPUS 23-11", draft=False))
 
+    def test_clone_without_images(self):
+        self.assertEqual(ip.clone_input(SAMPLE, name="TEST HAPUS 23-11", draft=True, images=False)["images"], [])
+
     def test_shipping_units_converted_to_cm_gr(self):
         p = json.loads(json.dumps(SAMPLE))
         p["shipping"].update(weight=1.5, weightUnit="KG", length=0.2, dimensionUnit="M")

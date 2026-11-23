@@ -752,13 +752,15 @@ def _apply_variant_changes(inp, product, changes):
             variants[i]["stock"] = int(_parse_amount(stock, "stock"))
 
 
-def clone_input(product, name, price=None, stock=None, draft=False):
+def clone_input(product, name, price=None, stock=None, draft=False, images=True):
     """CreateProductInput (draft=False) or CreateProductDraftInput (draft=True) for a new product copied from one
     of the owner's products. The draft input has no isActive (the site's draft form leaves it out)."""
     inp = _common_input(product, keep_ids=False)
     inp["name"] = name
     if draft:
         inp.pop("isActive", None)
+    if not images:
+        inp["images"] = []  # the site does not let a new product reuse another product's image files
     if inp.get("shippingOption") not in ("NO_SHIPMENT", "SELLER_COURIER"):
         inp["logisticConfigurations"] = []
     _apply_variant_changes(inp, product, {"price": price, "stock": stock})
@@ -907,7 +909,8 @@ def cmd_create(a):
             if not (a.from_id and a.name):
                 raise InaprocError("give --from PRODUCT_ID and --name NEW_NAME (or a SPEC.json)")
             src = c.get_product(a.from_id)
-            inp = clone_input(src, a.name, price=a.price, stock=a.stock, draft=not a.submit)
+            inp = clone_input(src, a.name, price=a.price, stock=a.stock, draft=not a.submit,
+                              images=not a.no_images)
             src_line = f"cloned from {src.get('name')} ({a.from_id})"
         name = inp.get("name") or ""
         if len(name) < 5:
@@ -1058,6 +1061,8 @@ def add_parsers(sub, common):
     s.add_argument("--name", help="name of the new product (min 5 characters, must be unique)")
     s.add_argument("--price", help="price of the (single) variant")
     s.add_argument("--stock", help="stock of the (single) variant")
+    s.add_argument("--no-images", action="store_true",
+                   help="leave images out (add them in the site afterwards; image files cannot be shared)")
     s.add_argument("--submit", action="store_true",
                    help="create and submit for LKPP curation (default: save as a draft)")
     s = padd("update", cmd_update, "dry run: change price, stock, name or any field")
