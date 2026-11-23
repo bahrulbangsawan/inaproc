@@ -47,6 +47,10 @@ class NotSignedIn(Exception):
     exit_code = 3
 
 
+class _TokenExpired(Exception):
+    pass
+
+
 def _err():
     from inaproc import InaprocError
     return InaprocError
@@ -508,6 +512,23 @@ class SellerClient:
         self.limiter = limiter or RateLimiter(1.0)
 
     def gql(self, op, variables):
+        """One GraphQL call. An expired access token (the login itself still valid) is refreshed by reloading the
+        penyedia tab, which makes the site renew it, then the call is tried once more. A rejected call never ran,
+        so retrying a write here cannot apply it twice."""
+        try:
+            return self._gql_once(op, variables)
+        except _TokenExpired:
+            _progress("Token penyedia kedaluwarsa · memuat ulang halaman")
+            self.tab.navigate(PENYEDIA + "/products")
+            self.tab.wait_load(timeout=60)
+            time.sleep(1.5)
+            try:
+                return self._gql_once(op, variables)
+            except _TokenExpired:
+                raise NotSignedIn("sesi penyedia kedaluwarsa (ERR_EXPIRED_TOKEN). Buka penyedia.inaproc.id di Safari "
+                                  "dan login lagi, atau jalankan `inaproc login`.")
+
+    def _gql_once(self, op, variables):
         InaprocError = _err()
         if op not in ALLOWED_OPS:
             raise InaprocError(f"{op} is not a product operation this tool may send")
@@ -532,6 +553,8 @@ class SellerClient:
             raise InaprocError(f"{op}: HTTP {status}, not JSON: {text[:200]}")
         if doc.get("errors"):
             msgs = "; ".join(e.get("message", "?") for e in doc["errors"])
+            if "EXPIRED_TOKEN" in msgs.upper() or "TOKEN EXPIRED" in msgs.upper():
+                raise _TokenExpired(msgs)
             if any("unauth" in m.lower() or "login" in m.lower() for m in msgs.split("; ")):
                 raise NotSignedIn(f"{op}: {msgs}; run `penyedia login`")
             raise InaprocError(f"{op}: {msgs}")

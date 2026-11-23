@@ -221,6 +221,30 @@ class CategoryExportTest(unittest.TestCase):
                 self.assertTrue(any("sheet" in n for n in z.namelist()))
 
 
+class ExpiredTokenTest(unittest.TestCase):
+    def test_expired_token_reloads_the_tab_and_retries_once(self):
+        n = {"i": 0}
+
+        def answer(v):
+            n["i"] += 1
+            if n["i"] == 1:
+                return (200, json.dumps({"errors": [{"message": "ERR_EXPIRED_TOKEN"}]}))
+            return {"listProduct": {"items": [], "total": 0}}
+        tab = FakeTab({"getListProduct": answer})
+        tab.navigate = mock.Mock()
+        tab.wait_load = mock.Mock(return_value=True)
+        res = fast_client(tab).list_products()
+        self.assertEqual(res["total"], 0)
+        tab.navigate.assert_called_once_with("https://penyedia.inaproc.id/products")
+
+    def test_still_expired_after_reload_means_sign_in_again(self):
+        tab = FakeTab({"getListProduct": (200, json.dumps({"errors": [{"message": "ERR_EXPIRED_TOKEN"}]}))})
+        tab.navigate = mock.Mock()
+        tab.wait_load = mock.Mock(return_value=True)
+        with self.assertRaises(ip.NotSignedIn):
+            fast_client(tab).list_products()
+
+
 class ProductsCommandTest(unittest.TestCase):
     def test_products_command_prints_table(self):
         tab = FakeTab({"getListProduct": {"listProduct": {"items": [ITEM], "total": 1, "currentPage": 1,
