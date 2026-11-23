@@ -526,6 +526,10 @@ class SellerClient:
     def get_product(self, product_id):
         return self.gql("getProductById", {"id": str(product_id)})
 
+    def name_available(self, name):
+        r = self.gql("checkProductNameAvailability", {"name": name, "productID": None})
+        return bool((r or {}).get("available", True))
+
 
 # ----------------------------------------------------------------------------- plans, diff, apply, write log
 def state_hash(product):
@@ -615,6 +619,211 @@ def apply_plan(client, path, continue_on_error=False):
     return res
 
 
+# ----------------------------------------------------------------------------- product -> GraphQL input
+# Mirrors the site's own form converters (penyedia bundle module 32426: B6, H3, Mk, tM, jH, D7, Ad, AB, FU, ct).
+_TO_GR = {"GR": 1, "KG": 1000}
+_TO_CM = {"CM": 1, "M": 100, "MM": 0.1}
+
+
+def _num(v):
+    return int(v) if isinstance(v, float) and v.is_integer() else v
+
+
+def _drop_none(d):
+    return {k: v for k, v in d.items() if v is not None}
+
+
+def _shipping(p):
+    if p.get("type") != "PHYSICAL":
+        return None
+    sh = p.get("shipping") or {}
+    wf = _TO_GR.get((sh.get("weightUnit") or "GR").upper(), 1)
+    df = _TO_CM.get((sh.get("dimensionUnit") or "CM").upper(), 1)
+    return {"width": _num((sh.get("width") or 0) * df), "weight": _num((sh.get("weight") or 0) * wf),
+            "length": _num((sh.get("length") or 0) * df), "height": _num((sh.get("height") or 0) * df),
+            "hasSellerShipping": bool(sh.get("hasSellerShipping")), "dimensionUnit": "CM", "weightUnit": "GR"}
+
+
+def _infos(items, keep_id):
+    out = []
+    for e in items or []:
+        if e.get("isReadOnly"):
+            continue
+        row = {"customFormFieldId": e.get("customFormFieldId"), "name": e.get("name"), "value": e.get("value")}
+        if keep_id:
+            row["id"] = e.get("id")
+        out.append(row)
+    return out
+
+
+def _common_input(p, keep_ids):
+    phys = p.get("type") == "PHYSICAL"
+    pdn = p.get("pdn") or {}
+    tax = p.get("tax") or {}
+    tkdn, sni, brand = p.get("tkdn") or {}, p.get("sni"), p.get("brand") or {}
+    stock_unit = p.get("stockUnit") or {}
+    prices = p.get("prices") or {}
+    inp = {
+        "name": p.get("name") or "", "description": p.get("description") or "",
+        "category": {"id": (p.get("category") or {}).get("id") or ""}, "kbki": p.get("kbki") or "",
+        "pdn": {"type": pdn.get("type"), "laborType": pdn.get("laborType"), "locationType": pdn.get("locationType"),
+                "materialType": pdn.get("materialType"), "countryCode": pdn.get("countryCode")},
+        "isActive": p.get("isActive", True),
+        "images": [_drop_none({"id": i.get("id") if keep_ids else None, "imageUrl": i.get("imageUrl")})
+                   for i in p.get("images") or [] if not i.get("isReadOnly")],
+        "videoSource": p.get("videoSource"), "videoUrl": p.get("videoUrl"),
+        "productInformations": {
+            "additionalInformations": _infos((p.get("productInformations") or {}).get("additionalInformations"), keep_ids),
+            "mainInformations": _infos((p.get("productInformations") or {}).get("mainInformations"), keep_ids)},
+        "productAddOns": None if p.get("productAddOns") is None else [
+            _drop_none({"id": a.get("id") if keep_ids else None, "name": a.get("name"), "description": a.get("description"),
+                        "type": a.get("type"), "productAddOnVariants": [
+                            _drop_none({"id": v.get("id") if keep_ids else None, "name": v.get("name"),
+                                        "description": v.get("description"), "price": v.get("price")})
+                            for v in a.get("productAddOnVariants") or []]})
+            for a in p["productAddOns"]],
+        "productOptions": None if p.get("productOptions") is None else [
+            _drop_none({"id": o.get("id") if keep_ids else None, "option": o.get("option"),
+                        "optionLevel": o.get("optionLevel"), "values": o.get("values") or [],
+                        "valueIds": o.get("valueIds") if keep_ids else None})
+            for o in p["productOptions"]],
+        "variants": [_drop_none({"id": v.get("id") if keep_ids else None}) | {
+            "price": v.get("price") or 0, "sku": v.get("sku") or "", "stock": v.get("stock") or 0,
+            "options": v.get("options"), "optionValues": v.get("optionValues"),
+            "isActive": v.get("isActive", True) is not False, "imageUrl": v.get("imageUrl") or ""}
+            for v in p.get("variants") or []],
+        "prices": {"minPurchase": prices.get("minPurchase") or 1, "productWholesalePrices": [
+            _drop_none({"id": w.get("id") if keep_ids else None, "minQuantity": w.get("minQuantity") or 0,
+                        "price": w.get("price") or 0}) for w in prices.get("productWholesalePrices") or []]},
+        "tkdn": {"number": tkdn["number"], "specificationId": tkdn.get("specificationId")}
+        if tkdn.get("number") and tkdn.get("status") not in ("REJECTED", "EXPIRED") else None,
+        "sni": {"brand": sni.get("brand") or "", "certificateNumber": sni.get("certificateNumber") or "",
+                "sniNumber": sni.get("sniNumber") or "", "spptNumber": sni.get("spptNumber"),
+                "companyName": sni.get("companyName")} if sni else None,
+        "brand": {"applicationNumber": brand["applicationNumber"]} if brand.get("applicationNumber") else None,
+        "preOrder": {"sla": (p.get("preOrder") or {}).get("sla") or 0} if p.get("preOrder") else None,
+        "stockUnit": {"primaryUnit": stock_unit.get("primaryUnit") or "PCS", "value": stock_unit.get("value"),
+                      "secondaryUnit": stock_unit.get("secondaryUnit")},
+        "shipping": _shipping(p),
+        "shippingOption": (p.get("shippingOption") or "STANDARD") if phys else "NO_SHIPMENT",
+        "tax": _drop_none({"ppnPercentage": tax.get("ppnPercentage"), "ppnBmId": tax.get("ppnBmId"),
+                           "ppnBmTaxPaymentStatus": tax.get("ppnBmTaxPaymentStatus") if tax.get("ppnBmId") else None,
+                           "ppnBmTaxPaymentFileToken": tax.get("ppnBmTaxPaymentFileToken") if tax.get("ppnBmId") else None}),
+        "additionalFee": {"isActive": (p.get("additionalFee") or {}).get("isActive")} if p.get("additionalFee") else None,
+        "hasDecimalQuantity": bool(p.get("hasDecimalQuantity")),
+    }
+    return {k: v for k, v in inp.items() if v is not None}
+
+
+def _parse_amount(v, what):
+    if isinstance(v, (int, float)):
+        return _num(v)
+    t = str(v).strip().replace("Rp", "").replace(" ", "")
+    if re.fullmatch(r"\d{1,3}(\.\d{3})+", t):
+        t = t.replace(".", "")
+    t = t.replace(",", ".")
+    try:
+        n = float(t)
+    except ValueError:
+        raise _err()(f"{what} {v!r} is not a number")
+    if n < 0:
+        raise _err()(f"{what} cannot be negative")
+    return _num(n)
+
+
+def _apply_variant_changes(inp, product, changes):
+    price, stock = changes.get("price"), changes.get("stock")
+    if price is None and stock is None:
+        return
+    variants = inp["variants"]
+    want = changes.get("variant")
+    if want:
+        idx = [i for i, v in enumerate(product.get("variants") or []) if want in (v.get("id"), v.get("sku"))]
+        if not idx:
+            raise _err()(f"variant {want!r} not found in product {product.get('id')}")
+    elif len(variants) == 1:
+        idx = [0]
+    else:
+        raise _err()(f"product {product.get('id')} has {len(variants)} variants; pass --variant ID_OR_SKU")
+    for i in idx:
+        if price is not None:
+            variants[i]["price"] = _parse_amount(price, "price")
+        if stock is not None:
+            variants[i]["stock"] = int(_parse_amount(stock, "stock"))
+
+
+def clone_input(product, name, price=None, stock=None):
+    """CreateProductInput / CreateProductDraftInput for a new product copied from one of the owner's products."""
+    inp = _common_input(product, keep_ids=False)
+    inp["name"] = name
+    if inp.get("shippingOption") not in ("NO_SHIPMENT", "SELLER_COURIER"):
+        inp["logisticConfigurations"] = []
+    _apply_variant_changes(inp, product, {"price": price, "stock": stock})
+    return inp
+
+
+def update_input(product, changes):
+    """UpdateProductInput: the product as it is (ids kept) with `changes` applied.
+
+    changes: price, stock, variant (id or sku), name, set {dotted.path: value}."""
+    inp = _common_input(product, keep_ids=True)
+    if changes.get("name"):
+        inp["name"] = changes["name"]
+    _apply_variant_changes(inp, product, changes)
+    for path, value in (changes.get("set") or {}).items():
+        node, keys = inp, path.split(".")
+        for k in keys[:-1]:
+            node = node.setdefault(k, {})
+        node[keys[-1]] = value
+    return inp
+
+
+def delete_writes(client, ids):
+    writes = []
+    for pid in ids:
+        p = client.get_product(pid)
+        writes.append({"op": "deleteProduct", "variables": {"id": str(pid)}, "productId": str(pid),
+                       "beforeHash": state_hash(p),
+                       "summary": f"DELETE {p.get('name')} (status {p.get('status')}) {product_link(p) or ''}".strip()})
+    return writes
+
+
+def update_writes(client, pid, changes):
+    p = client.get_product(pid)
+    before, after = update_input(p, {}), update_input(p, changes)
+    changed = diff(before, after)
+    if not changed:
+        return [], p, []
+    return [{"op": "updateProduct", "variables": {"id": str(pid), "input": after}, "productId": str(pid),
+             "beforeHash": state_hash(p), "summary": f"UPDATE {p.get('name')}",
+             "diff": [[path, old, new] for path, old, new in changed]}], p, changed
+
+
+def bulk_writes(client, rows):
+    """rows: dicts with id plus any of price, stock, name, variant. Returns (writes, skipped, invalid)."""
+    writes, skipped, invalid = [], [], []
+    for n, row in enumerate(rows, 1):
+        row = {str(k).strip().lower(): ("" if v is None else str(v).strip()) for k, v in row.items()}
+        pid = row.get("id")
+        if not pid:
+            invalid.append(f"row {n}: no id")
+            continue
+        changes = {k: row[k] for k in ("price", "stock", "name", "variant") if row.get(k)}
+        try:
+            for k in ("price", "stock"):
+                if k in changes:
+                    _parse_amount(changes[k], k)
+            w, _, _ = update_writes(client, pid, changes)
+        except _err() as e:
+            invalid.append(f"row {n} ({pid}): {e}")
+            continue
+        if w:
+            writes += w
+        else:
+            skipped.append(f"row {n} ({pid}): no change")
+    return writes, skipped, invalid
+
+
 def product_link(p):
     return f"https://katalog.inaproc.id/{p.get('username')}/{p.get('slug')}" if p.get("slug") else None
 
@@ -675,6 +884,131 @@ def cmd_product_get(a):
     emit(a, "penyedia-product", str(a.id), p, md, {"product": [p]})
 
 
+def _save_plan_and_tell(client, kind, writes, lines):
+    plan = make_plan(kind, client.account(), writes)
+    print("\n".join(lines))
+    print(f"\nNothing was sent. To send exactly this plan: penyedia apply {plan}")
+    return plan
+
+
+def cmd_create(a):
+    InaprocError = _err()
+    op = "createProduct" if a.submit else "createProductDraft"
+    b, c = _client(a)
+    try:
+        if a.spec:
+            with open(a.spec, encoding="utf-8") as f:
+                inp = json.load(f)
+            src_line = f"from spec {a.spec}"
+        else:
+            if not (a.from_id and a.name):
+                raise InaprocError("give --from PRODUCT_ID and --name NEW_NAME (or a SPEC.json)")
+            src = c.get_product(a.from_id)
+            inp = clone_input(src, a.name, price=a.price, stock=a.stock)
+            src_line = f"cloned from {src.get('name')} ({a.from_id})"
+        name = inp.get("name") or ""
+        if len(name) < 5:
+            raise InaprocError("the product name needs at least 5 characters")
+        if not c.name_available(name):
+            raise InaprocError(f"the name {name!r} is already used by one of your products")
+        v = inp.get("variants") or [{}]
+        lines = [f"**Dry run: {'create and submit for curation' if a.submit else 'create as DRAFT'}** — {op}",
+                 f"- Name: {name}", f"- {src_line}",
+                 f"- Category: {(inp.get('category') or {}).get('id')}",
+                 f"- Variants: {len(v)}; first price {_money(v[0].get('price'))}, stock {v[0].get('stock')}",
+                 f"- Images: {len(inp.get('images') or [])}"]
+        _save_plan_and_tell(c, "create", [{"op": op, "variables": {"input": inp}, "summary": f"CREATE {name}"}],
+                            lines)
+    finally:
+        b.close()
+
+
+def cmd_update(a):
+    from inaproc import table
+    changes = {k: v for k, v in (("price", a.price), ("stock", a.stock), ("name", a.name),
+                                 ("variant", a.variant)) if v is not None}
+    if a.set:
+        changes["set"] = {}
+        for item in a.set:
+            k, _, v = item.partition("=")
+            try:
+                changes["set"][k] = json.loads(v)
+            except ValueError:
+                changes["set"][k] = v
+    b, c = _client(a)
+    try:
+        writes, p, changed = update_writes(c, a.id, changes)
+        if not writes:
+            print(f"No change: {p.get('name')} already has these values. Nothing to send.")
+            return
+        lines = [f"**Dry run: update {p.get('name')}** ({product_link(p) or a.id})", "",
+                 table(["Field", "Now", "After"], [[k, json.dumps(o, ensure_ascii=False), json.dumps(n, ensure_ascii=False)]
+                                                  for k, o, n in changed])]
+        _save_plan_and_tell(c, "update", writes, lines)
+    finally:
+        b.close()
+
+
+def cmd_delete(a):
+    b, c = _client(a)
+    try:
+        writes = delete_writes(c, a.ids)
+        lines = [f"**Dry run: delete {len(writes)} product(s)** — this cannot be undone on the site:"]
+        lines += [f"- {w['summary']}" for w in writes]
+        _save_plan_and_tell(c, "delete", writes, lines)
+    finally:
+        b.close()
+
+
+def _read_rows(path):
+    import csv
+    if path.lower().endswith(".xlsx"):
+        from inaproc import read_xlsx
+        sheets = read_xlsx(path)
+        grid = next(iter(sheets.values())) if sheets else []
+        if not grid:
+            return []
+        head = [str(h or "").strip() for h in grid[0]]
+        return [dict(zip(head, r)) for r in grid[1:] if any(c not in (None, "") for c in r)]
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def cmd_bulk(a):
+    from inaproc import table
+    b, c = _client(a)
+    try:
+        writes, skipped, invalid = bulk_writes(c, _read_rows(a.file))
+        if invalid:
+            raise _err()("fix these rows first (no plan was made):\n" + "\n".join(f"- {x}" for x in invalid))
+        if not writes:
+            print("Every row matches the site already. Nothing to send.")
+            return
+        rows = [[w["productId"], w["summary"][7:], p, json.dumps(o), json.dumps(n)]
+                for w in writes for p, o, n in w["diff"]]
+        lines = [f"**Dry run: bulk update, {len(writes)} product(s)** ({len(skipped)} unchanged row(s) skipped)", "",
+                 table(["ID", "Product", "Field", "Now", "After"], rows)]
+        _save_plan_and_tell(c, "bulk-update", writes, lines)
+    finally:
+        b.close()
+
+
+def cmd_apply(a):
+    from inaproc import table
+    b, c = _client(a)
+    try:
+        res = apply_plan(c, a.plan, continue_on_error=a.continue_on_error)
+    finally:
+        b.close()
+    print(table(["Operation", "Product", "What", "Result"],
+                [[r["op"], r.get("productId") or (r.get("response") or {}).get("id") or "", r.get("summary"),
+                  r["result"]] for r in res["results"]]))
+    print(f"\n{res['done']} done, {res['failed']} failed, {res['skipped']} skipped, {res['notRun']} not run. "
+          f"Logged to {ic.private_dir('penyedia') / 'writes.log.jsonl'}")
+    if res["failed"]:
+        raise _err()("some writes failed (see above)")
+
+
 # ----------------------------------------------------------------------------- CLI wiring
 def add_parsers(sub, common):
     p = sub.add_parser("penyedia", help="your own seller account on penyedia.inaproc.id (local Chrome needed)")
@@ -699,8 +1033,41 @@ def add_parsers(sub, common):
     s.add_argument("--search", help="only names containing this text (on the fetched page)")
     s.add_argument("--status", help="only this status, e.g. ACTIVE")
     s.add_argument("--filter", help="raw ListProductFilterInput JSON passed to the site")
-    s = add("product", cmd_product_get, "show one of your products in full")
+    pp = ps.add_parser("product", help="one product: get, create, update, delete (writes are dry runs)")
+    pps = pp.add_subparsers(dest="product_cmd", required=True)
+    _parent = ps
+
+    def padd(name, fn, help_):
+        sp = pps.add_parser(name, help=help_, parents=[common])
+        sp.set_defaults(fn=fn)
+        sp.add_argument("--browser", choices=["safari", "chrome"], default=default_browser())
+        sp.add_argument("--chrome-path")
+        return sp
+
+    s = padd("get", cmd_product_get, "show one of your products in full")
     s.add_argument("id")
+    s = padd("create", cmd_create, "dry run: new product cloned from one of yours (or from a spec JSON)")
+    s.add_argument("spec", nargs="?", help="CreateProductInput JSON (advanced)")
+    s.add_argument("--from", dest="from_id", help="your product to copy (category, specs, images, shipping)")
+    s.add_argument("--name", help="name of the new product (min 5 characters, must be unique)")
+    s.add_argument("--price", help="price of the (single) variant")
+    s.add_argument("--stock", help="stock of the (single) variant")
+    s.add_argument("--submit", action="store_true",
+                   help="create and submit for LKPP curation (default: save as a draft)")
+    s = padd("update", cmd_update, "dry run: change price, stock, name or any field")
+    s.add_argument("id")
+    s.add_argument("--price")
+    s.add_argument("--stock")
+    s.add_argument("--variant", help="variant id or SKU (needed when the product has several)")
+    s.add_argument("--name")
+    s.add_argument("--set", action="append", help="dotted.path=value on the update input (repeatable)")
+    s = padd("delete", cmd_delete, "dry run: delete one or more of your products")
+    s.add_argument("ids", nargs="+")
+    s = add("bulk-update", cmd_bulk, "dry run: update many products from a CSV/XLSX (columns id, price, stock, …)")
+    s.add_argument("file")
+    s = add("apply", cmd_apply, "send exactly the writes in a plan file (only after you approved it)")
+    s.add_argument("plan")
+    s.add_argument("--continue-on-error", action="store_true")
     s = add("record", cmd_record, "record the site's API calls while you work in the window")
     s.add_argument("--duration", type=float, help="stop after this many minutes (default: when the window closes)")
     return p
