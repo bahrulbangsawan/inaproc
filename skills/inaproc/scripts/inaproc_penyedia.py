@@ -109,9 +109,15 @@ def open_penyedia(headed=True, keep_open=False, chrome_path=None, path="/product
     return b, tab
 
 
-def session_info(tab):
-    """{signedIn, name, company, expires} for the profile's penyedia session (no tokens)."""
+def session_info(tab, navigate=True):
+    """{signedIn, name, company, expires} for the profile's penyedia session (no tokens).
+
+    navigate=False is for `login`: while the owner is on the sign-in pages (another origin, or
+    penyedia's /auth pages) the tab is left alone, and the check waits until the site sends it back."""
     url = tab.url()
+    on_auth = (not url.startswith(PENYEDIA)) or urllib.parse.urlsplit(url).path.startswith("/auth")
+    if not navigate and on_auth:
+        return {"signedIn": False, "pending": True}
     if not url.startswith(PENYEDIA):
         tab.navigate(PENYEDIA + "/products")
         tab.wait_load(timeout=60)
@@ -139,7 +145,7 @@ def cmd_login(a):
             if tab.closed:
                 raise _err()("the login window was closed before signing in")
             try:
-                info = session_info(tab)
+                info = session_info(tab, navigate=False)
             except ic.ChromeError:
                 info = {"signedIn": False}
             if info.get("signedIn"):
