@@ -41,7 +41,7 @@ sys.modules.setdefault("inaproc", sys.modules[__name__])
 
 ENDPOINT = "https://katalog.inaproc.id/graphql"
 SITE = "https://katalog.inaproc.id"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 CHROME_MAJOR = 158  # keep User-Agent and sec-ch-ua on the same Chrome version
 MIN_INTERVAL_FLOOR = 0.5   # never faster than 2 request starts per second, whatever the flags say
 MAX_CONCURRENCY = 4
@@ -1659,6 +1659,10 @@ def build_parser():
     import inaproc_penyedia
     inaproc_penyedia.add_parsers(sub, common)
 
+    import inaproc_update
+    s = add("update", inaproc_update.cmd_update, "update this installed skill from GitHub now (it also checks daily)")
+    s.add_argument("--check", action="store_true", help="only say whether a newer version exists")
+
     add("ops", cmd_ops, "list bundled public operations")
     add("engine", cmd_engine, "show which HTTP engine and settings will be used")
 
@@ -1704,10 +1708,15 @@ def main(argv=None):
     for w in compat_warnings(args):
         print(f"warning: {w}", file=sys.stderr)
     try:
-        offline = args.cmd in ("ops", "discover", "read-xlsx", "penyedia") or (args.cmd == "rab-report" and not args.verify)
+        offline = args.cmd in ("ops", "discover", "read-xlsx", "penyedia", "update") or (args.cmd == "rab-report" and not args.verify)
         if not offline:
             CLIENT = Client(proxy=args.proxy, min_interval=args.min_interval, concurrency=args.concurrency)
         args.fn(args)
+        if args.cmd != "update":
+            import inaproc_update
+            note = inaproc_update.maybe_update(VERSION)  # at most once a day; silent on any problem
+            if note:
+                print(f"\n{note}", file=sys.stderr)
     except InaprocError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

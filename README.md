@@ -210,10 +210,20 @@ If PowerShell blocks the script: `powershell -ExecutionPolicy Bypass -File .\ins
 
 ### Update or uninstall
 
+**Updates are automatic.** An installed copy checks GitHub at most once a day (after a command finishes, with a 3-second timeout) and, when a newer version is out, downloads it, checks it, keeps the old copy in `~/.inaproc/backups/` and swaps it in. You'll see one line: *"inaproc updated 1.3.0 → 1.4.0 (takes effect from the next command)"*.
+
 ```bash
-./install.sh claude       # re-running updates in place (same for codex)
+python3 ~/.claude/skills/inaproc/scripts/inaproc.py update --check   # is there a newer version?
+python3 ~/.claude/skills/inaproc/scripts/inaproc.py update           # install it now
+export INAPROC_AUTO_UPDATE=0                                          # turn automatic updates off
+./install.sh claude       # re-running the installer also updates in place (same for codex)
 ./install.sh uninstall    # removes the Claude Code and Codex installs
 ```
+
+Copies inside a git checkout never update themselves (use `git pull`), and the claude.ai upload can't (re-upload the new `inaproc.zip`).
+
+> [!NOTE]
+> **Releasing a new version (maintainers):** bump `VERSION` in `skills/inaproc/scripts/inaproc.py` **and** `skills/inaproc/version.json` (a test keeps them equal), push to `main`, and installed copies pick it up within a day.
 
 ---
 
@@ -388,6 +398,7 @@ python3 $S --help                      # all commands;  <command> --help for opt
 | `kbli` · `ppn` | KBLI codes · PPN rates | |
 | `raw <op> --vars JSON` · `ops` | Any bundled public GraphQL operation | |
 | `engine` | Shows the HTTP engine and limits in use | |
+| `update` | Update the installed skill from GitHub now (it also checks daily) | `--check` |
 | `discover [urls]` | Re-capture the site's API in your own Chrome window | `--wait S` `--headless` `--update-queries` `--chrome-path` |
 
 **Penyedia (your own account)** — add `--browser safari|chrome` to any of them (Safari is the default on macOS):
@@ -407,7 +418,7 @@ python3 $S --help                      # all commands;  <command> --help for opt
 
 **Options available on every command:** `--json` · `--save json,csv,xlsx,yaml` · `--out-dir DIR` · `--proxy URL` · `--min-interval S` · `--concurrency 1-4`
 
-**Environment variables:** `INAPROC_ENGINE`, `INAPROC_PROXY`, `INAPROC_MIN_INTERVAL`, `INAPROC_CHROME`
+**Environment variables:** `INAPROC_PROXY`, `INAPROC_MIN_INTERVAL`, `INAPROC_CHROME`, `INAPROC_BROWSER` (safari\|chrome), `INAPROC_HOME` (default `~/.inaproc`), `INAPROC_AUTO_UPDATE=0`
 
 </details>
 
@@ -522,6 +533,8 @@ inaproc/
 │   ├── scripts/inaproc_chrome.py   ← Chrome DevTools client (discover)
 │   ├── scripts/inaproc_safari.py   ← your own Safari via AppleScript (penyedia)
 │   ├── scripts/inaproc_penyedia.py ← seller commands, plans, apply, write log
+│   ├── scripts/inaproc_update.py   ← daily self-update from GitHub
+│   ├── version.json           ← the published version (auto-update reads it)
 │   ├── scripts/queries.json   ← the 22 public GraphQL operations
 │   ├── scripts/penyedia_queries.json ← the 11 seller product operations
 │   └── references/api.md      ← request format, variables, enums, fields
