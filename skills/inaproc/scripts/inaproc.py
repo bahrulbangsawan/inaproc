@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """inaproc — search Indonesia's government e-catalogue (katalog.inaproc.id).
 
-Works with the Python 3.8+ standard library alone. If Scrapling
-(https://github.com/D4Vinci/Scrapling, `pip install "scrapling[fetchers]"`) is
-installed it is used automatically for browser-grade TLS fingerprints and
-headers, and it powers the `discover` command (stealth browser + background
-API capture). Only the public, no-login GraphQL operations are called.
+Works with the Python 3.8+ standard library alone, sending Chrome-style request
+headers. The `discover` command (and the `penyedia` seller commands) drive a
+locally installed Chrome over the DevTools Protocol, with no extra packages.
+The catalogue commands call only the public, no-login GraphQL operations.
 
 Examples:
   python3 inaproc.py search "kertas hvs a4" --sort price-asc --type barang
@@ -15,7 +14,7 @@ Examples:
   python3 inaproc.py seller anak-terusan --products 10
   python3 inaproc.py read-xlsx RAB.xlsx
   python3 inaproc.py rab-report spec.json --verify --save xlsx --out-dir .
-  python3 inaproc.py discover --headed            # needs Scrapling + `scrapling install`
+  python3 inaproc.py discover --headed            # needs a local Chrome/Chromium/Edge/Brave
 """
 import argparse
 import csv
@@ -80,44 +79,24 @@ class RateLimiter:
             time.sleep(start - now)
 
 
-def _scrapling_available():
-    try:
-        import scrapling.fetchers  # noqa: F401
-        return True
-    except Exception:
-        return False
-
 
 class Client:
-    """One persistent session for the whole run (cookies + keep-alive).
+    """One persistent session for the whole run (cookies + keep-alive), standard library only."""
 
-    engine "scrapling": Scrapling FetcherSession (curl_cffi) with a real browser
-    TLS/HTTP fingerprint and matching stealth headers, one session per thread.
-    engine "stdlib": urllib with a shared cookie jar.
-    """
+    engine = "stdlib"
 
-    def __init__(self, engine="auto", impersonate="chrome", http3=False, proxy=None,
-                 min_interval=1.0, concurrency=1, timeout=30):
+    def __init__(self, proxy=None, min_interval=1.0, concurrency=1, timeout=30):
         self.limiter = RateLimiter(min_interval)
         self.concurrency = max(1, min(MAX_CONCURRENCY, concurrency))
         self.timeout = timeout
         self.proxy = proxy
-        self.impersonate = impersonate
-        self.http3 = http3
         self._local = threading.local()
         self._sessions = []
         self._lock = threading.Lock()
-        if engine == "auto":
-            engine = "scrapling" if _scrapling_available() else "stdlib"
-        if engine == "scrapling" and not _scrapling_available():
-            raise InaprocError('engine "scrapling" requested but Scrapling is not installed: '
-                               'pip install "scrapling[fetchers]"')
-        self.engine = engine
-        if engine == "stdlib":
-            handlers = [urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())]
-            if proxy:
-                handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-            self._opener = urllib.request.build_opener(*handlers)
+        handlers = [urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())]
+        if proxy:
+            handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        self._opener = urllib.request.build_opener(*handlers)
 
     def _post_stdlib(self, body):
         req = urllib.request.Request(ENDPOINT, data=body, headers=dict(BASE_HEADERS, **{"user-agent": UA}),
@@ -128,31 +107,11 @@ class Client:
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode("utf-8", "replace")
 
-    def _session(self):
-        s = getattr(self._local, "session", None)
-        if s is None:
-            from scrapling.fetchers import FetcherSession
-            kwargs = dict(impersonate=self.impersonate, stealthy_headers=True, http3=self.http3,
-                          timeout=self.timeout, retries=1, follow_redirects="safe")
-            if self.proxy:
-                kwargs["proxy"] = self.proxy
-            cm = FetcherSession(**kwargs)
-            s = cm.__enter__()
-            self._local.session = s
-            with self._lock:
-                self._sessions.append(cm)
-        return s
-
-    def _post_scrapling(self, body):
-        r = self._session().post(ENDPOINT, data=body, headers=BASE_HEADERS)
-        raw = r.body if isinstance(r.body, (bytes, bytearray)) else str(r.body).encode()
-        return r.status, raw.decode("utf-8", "replace")
-
     def gql(self, op, variables):
         if op not in QUERIES:
             raise InaprocError(f"unknown operation {op!r}; run `ops` to list them")
         body = json.dumps({"operationName": op, "query": QUERIES[op], "variables": variables}).encode()
-        post = self._post_scrapling if self.engine == "scrapling" else self._post_stdlib
+        post = self._post_stdlib
         for attempt in range(3):
             self.limiter.wait()
             try:
@@ -874,9 +833,7 @@ def cmd_ops(a):
 
 
 def cmd_engine(a):
-    print(json.dumps({"engine": CLIENT.engine, "scraplingInstalled": _scrapling_available(),
-                      "impersonate": CLIENT.impersonate if CLIENT.engine == "scrapling" else None,
-                      "http3": CLIENT.http3, "minInterval": CLIENT.limiter.interval,
+    print(json.dumps({"engine": CLIENT.engine, "minInterval": CLIENT.limiter.interval,
                       "concurrency": CLIENT.concurrency, "proxy": bool(CLIENT.proxy)}, indent=2))
 
 
@@ -1476,9 +1433,9 @@ def build_parser():
     g.add_argument("--out-dir", help="base folder; files go to <out-dir>/output/ (required with --save)")
     n = common.add_argument_group("network")
     n.add_argument("--engine", choices=["auto", "stdlib", "scrapling"], default=os.environ.get("INAPROC_ENGINE", "auto"),
-                   help="HTTP engine (auto = Scrapling if installed, else standard library)")
-    n.add_argument("--impersonate", default="chrome", help="browser fingerprint for the Scrapling engine")
-    n.add_argument("--http3", action="store_true", help="use HTTP/3 (Scrapling engine)")
+                   help="HTTP engine (auto and stdlib both use the built-in engine)")
+    n.add_argument("--impersonate", default=None, help=argparse.SUPPRESS)
+    n.add_argument("--http3", action="store_true", help=argparse.SUPPRESS)
     n.add_argument("--proxy", default=os.environ.get("INAPROC_PROXY"), help="http(s)://user:pass@host:port")
     n.add_argument("--min-interval", type=float, default=float(os.environ.get("INAPROC_MIN_INTERVAL", "1.0")),
                    help=f"seconds between request starts (floor {MIN_INTERVAL_FLOOR})")
@@ -1592,6 +1549,18 @@ def build_parser():
     return p
 
 
+def compat_warnings(args):
+    """Options kept from v1.0 so old scripts keep running; each one only prints a warning now."""
+    out = []
+    if getattr(args, "engine", None) == "scrapling":
+        out.append("Scrapling support was removed in v1.1; using the built-in engine")
+    if getattr(args, "impersonate", None):
+        out.append("--impersonate is ignored since v1.1 (Scrapling support was removed)")
+    if getattr(args, "http3", False):
+        out.append("--http3 is ignored since v1.1 (Scrapling support was removed)")
+    return out
+
+
 def main(argv=None):
     global CLIENT
     args = build_parser().parse_args(argv)
@@ -1604,11 +1573,12 @@ def main(argv=None):
             print("error: --save needs --out-dir (ask the user where to save; files go to <out-dir>/output/)",
                   file=sys.stderr)
             return 2
+    for w in compat_warnings(args):
+        print(f"warning: {w}", file=sys.stderr)
     try:
         offline = args.cmd in ("ops", "discover", "read-xlsx") or (args.cmd == "rab-report" and not args.verify)
         if not offline:
-            CLIENT = Client(engine=args.engine, impersonate=args.impersonate, http3=args.http3, proxy=args.proxy,
-                            min_interval=args.min_interval, concurrency=args.concurrency)
+            CLIENT = Client(proxy=args.proxy, min_interval=args.min_interval, concurrency=args.concurrency)
         args.fn(args)
     except InaprocError as e:
         print(f"error: {e}", file=sys.stderr)

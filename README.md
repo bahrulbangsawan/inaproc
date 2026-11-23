@@ -76,7 +76,7 @@ Replace `claude` with `codex` for Codex, or `all` for Claude Code + Codex + a zi
 | 🗂 | **Reference data** | Category tree, provinces and cities with area codes, KBLI codes, PPN rates |
 | 💾 | **Exports** | **XLSX, CSV, JSON, YAML** in an `output/` folder; the assistant asks for the format and location first |
 | 🛡 | **Polite networking** | About 1 request/second, bounded concurrency, automatic backoff on rate limits |
-| 🕵️ | **Optional Scrapling engine** | Browser-grade TLS fingerprint, plus a stealth-browser `discover` mode to re-capture the API if the site changes |
+| 🕵️ | **Zero installs** | Chrome-style request headers, and a `discover` mode that drives your own Chrome to re-capture the API if the site changes |
 
 ### How it works
 
@@ -125,8 +125,7 @@ No `pip install` is needed. The script, including its XLSX and YAML writers, use
 
 | Extra | Adds | Install |
 |---|---|---|
-| [Scrapling](https://github.com/D4Vinci/Scrapling) | Browser-grade TLS/HTTP fingerprint for every request | `pip install "scrapling[fetchers]"` (Python **3.10+**) or `./install.sh scrapling` |
-| A Chromium browser | The `discover` maintenance command | `scrapling install`, or point `--chrome-path` at an existing Chrome |
+| Chrome, Chromium, Edge or Brave | The `discover` maintenance command and the `penyedia` seller commands | Found automatically, or point `--chrome-path` / `INAPROC_CHROME` at it |
 
 </details>
 
@@ -302,29 +301,30 @@ python3 $S --help                      # all commands;  <command> --help for opt
 | `engine` | Shows the HTTP engine and limits in use | |
 | `discover [urls]` | Re-capture the site's API in a stealth browser | `--headed` `--wait S` `--update-queries` `--chrome-path` |
 
-**Options available on every command:** `--json` · `--save json,csv,xlsx,yaml` · `--out-dir DIR` · `--engine auto|stdlib|scrapling` · `--impersonate chrome|firefox|safari…` · `--http3` · `--proxy URL` · `--min-interval S` · `--concurrency 1-4`
+**Options available on every command:** `--json` · `--save json,csv,xlsx,yaml` · `--out-dir DIR` · `--proxy URL` · `--min-interval S` · `--concurrency 1-4`
 
 **Environment variables:** `INAPROC_ENGINE`, `INAPROC_PROXY`, `INAPROC_MIN_INTERVAL`, `INAPROC_CHROME`
 
 </details>
 
 <details>
-<summary><b>Network engine and Scrapling</b></summary>
+<summary><b>Network engine and Chrome</b></summary>
 
 <br>
 
-| Capability | Default (standard library) | With [Scrapling](https://github.com/D4Vinci/Scrapling) |
-|---|---|---|
-| Session management (cookies, keep-alive) | ✅ | ✅ `FetcherSession` |
-| Browser TLS/HTTP fingerprint | browser headers | ✅ `--impersonate`, `--http3` |
-| Concurrent requests (rate-limited) | ✅ `--concurrency 1-4` | ✅ |
-| Your own proxy | ✅ `--proxy` | ✅ |
-| Background API capture · dynamic loading · ad/domain blocking · DNS-over-HTTPS | — | ✅ `discover` |
+| Capability | How |
+|---|---|
+| Session management (cookies, keep-alive) | ✅ built in |
+| Browser-style headers | ✅ Chrome's header set and order, matching User-Agent (TLS fingerprint stays Python's) |
+| Concurrent requests (rate-limited) | ✅ `--concurrency 1-4` |
+| Your own proxy | ✅ `--proxy` |
+| Background API capture · dynamic loading · tracker blocking | ✅ `discover`, driving your own Chrome over the DevTools Protocol |
+
+Removed in v1.1: the optional Scrapling engine. `--engine scrapling`, `--impersonate` and `--http3` are still accepted but only print a warning.
 
 `discover` is a maintenance tool. If the site changes and a command breaks, re-capture the live GraphQL calls:
 
 ```bash
-pip install "scrapling[fetchers]" && scrapling install
 python3 $S discover --headed --wait 60 --update-queries   # click around in the window that opens
 ```
 
@@ -390,7 +390,7 @@ The catalogue's API is internal and can change. Run <code>discover --headed --wa
 inaproc/
 ├── skills/inaproc/            ← the skill (this folder is what gets installed)
 │   ├── SKILL.md               ← instructions the assistant follows
-│   ├── scripts/inaproc.py     ← standard-library CLI (Scrapling optional)
+│   ├── scripts/inaproc.py     ← standard-library CLI
 │   ├── scripts/queries.json   ← the 22 public GraphQL operations
 │   └── references/api.md      ← request format, variables, enums, fields
 ├── codex/prompts/inaproc.md   ← /prompts:inaproc for Codex

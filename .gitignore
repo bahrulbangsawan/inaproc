@@ -10,3 +10,4 @@ output/
 skills/inaproc/scripts/queries.discovered.json
 *.har
 .DS_Store
+.superpowers/

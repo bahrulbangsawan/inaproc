@@ -1,7 +1,7 @@
 ---
 name: inaproc
 description: Search and analyse Indonesia's government e-catalogue INAPROC (katalog.inaproc.id, Katalog Elektronik LKPP), using public data only with no login. Use it to search products, open product details (price incl. PPN, variants, TKDN/BMP, PDN, specifications, stock), find the cheapest matching products, compare products side by side, build a RAB price comparison (perbandingan / pembanding harga) against the user's own company with at least two comparison products and their links, look up a seller/penyedia (profile, score, product list), read reviews, browse categories, look up regions or KBLI codes, and export any of it to JSON, CSV, XLSX or YAML. Use it whenever the user mentions INAPROC, e-katalog, katalog elektronik, LKPP, pengadaan or belanja pemerintah, a penyedia on the catalogue or a katalog.inaproc.id link, gives a RAB file with their company's catalogue link and asks for pembanding, or asks for the price ("harga") of goods or services government buyers can order, even if they don't name the site.
-compatibility: Python 3.8+ (standard library only; Scrapling optional) and network access to katalog.inaproc.id
+compatibility: Python 3.8+ (standard library only) and network access to katalog.inaproc.id; `discover` and the `penyedia` seller commands also need a local Chrome, Chromium, Edge or Brave
 ---
 
 # INAPROC catalogue search
@@ -115,18 +115,18 @@ Never invent or adjust a price, size or spec to make the company win; if a line 
 
 ## Network engine and capabilities
 
-The script picks the best engine available (check with `engine`):
+The script uses one built-in engine (check its settings with `engine`):
 
 | Capability | How it works | Flags |
 |---|---|---|
 | Session management | One persistent session per run, with cookie jar and keep-alive | — |
-| Browser-grade fingerprint (anti-bot at the HTTP layer) | If [Scrapling](https://github.com/D4Vinci/Scrapling) is installed (`pip install "scrapling[fetchers]"`), requests go through its `FetcherSession` with a real browser TLS/HTTP fingerprint and matching headers. Otherwise the standard library is used with browser headers. | `--engine auto\|scrapling\|stdlib`, `--impersonate chrome\|firefox\|safari…`, `--http3` |
+| Browser-style headers | Every request carries the header set Chrome sends (`sec-ch-ua*`, `Sec-Fetch-*`, Origin, Referer, Accept-Language) in Chrome's order, with a matching User-Agent. The TLS fingerprint stays Python's. | — |
 | Async / concurrency | Multi-page searches, `compare`, `seller` and `reviews` run calls in parallel (default 2, max 4) behind one shared rate limiter | `--concurrency N` |
 | Polite rate limiting | ≥1 s between request starts by default (hard floor 0.5 s); 429/503 retried twice with backoff | `--min-interval S` |
 | Proxy | Your own HTTP(S) proxy, e.g. an office network | `--proxy URL` or `INAPROC_PROXY` |
-| Background API capture, dynamic loading, ad/domain blocking, DNS-leak prevention | The `discover` command opens the site in Scrapling's stealth browser with `record_requests`, `network_idle` and optional `--wait`, `block_ads` plus tracker `blocked_domains`, and `dns_over_https`. It lists every GraphQL operation the pages call. | `discover [urls] --headed --wait 60 --update-queries --chrome-path PATH` |
+| Background API capture, dynamic loading, tracker blocking | The `discover` command opens the site in your own Chrome (a separate, never-logged-in skill profile) over the DevTools Protocol, blocks trackers, waits for the network to go idle (plus optional `--wait`) and lists every GraphQL operation the pages call. | `discover [urls] --headed --wait 60 --update-queries --chrome-path PATH` |
 
-`discover` is for maintenance: run it when a command starts failing because the site changed its API, then merge the new texts from `scripts/queries.discovered.json` into `queries.json`. It needs `pip install "scrapling[fetchers]"` plus either `scrapling install` (downloads a browser) or `--chrome-path` to an existing Chrome. First page loads on this site are server-rendered, so use `--headed --wait 60` and click around (categories, filters, a product, a store) to capture more operations.
+`discover` is for maintenance: run it when a command starts failing because the site changed its API, then merge the new texts from `scripts/queries.discovered.json` into `queries.json`. It needs Chrome, Chromium, Edge or Brave installed (found automatically, or pass `--chrome-path` / set `INAPROC_CHROME`); no pip packages. First page loads on this site are server-rendered, so use `--headed --wait 60` and click around (categories, filters, a product, a store) to capture more operations.
 
 **Limits that stay in place:**
 - Requests stay paced by the rate limiter, and the tool doesn't rotate proxies to get around the site's limits.
