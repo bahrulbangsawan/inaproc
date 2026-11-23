@@ -76,7 +76,8 @@ Replace `claude` with `codex` for Codex, or `all` for Claude Code + Codex + a zi
 | 🗂 | **Reference data** | Category tree, provinces and cities with area codes, KBLI codes, PPN rates |
 | 💾 | **Exports** | **XLSX, CSV, JSON, YAML** in an `output/` folder; the assistant asks for the format and location first |
 | 🛡 | **Polite networking** | About 1 request/second, bounded concurrency, automatic backoff on rate limits |
-| 🕵️ | **Optional Scrapling engine** | Browser-grade TLS fingerprint, plus a stealth-browser `discover` mode to re-capture the API if the site changes |
+| 🏬 | **Your own penyedia products** | List, eligible categories for your KBLI, add (clone as draft), update, bulk-update from CSV/XLSX and delete products in **your** penyedia.inaproc.id account through your own signed-in Safari (macOS) — every write is a dry run you approve, then `penyedia apply` |
+| 🕵️ | **Zero installs** | Chrome-style request headers, and a `discover` mode that drives your own Chrome to re-capture the API if the site changes |
 
 ### How it works
 
@@ -125,8 +126,7 @@ No `pip install` is needed. The script, including its XLSX and YAML writers, use
 
 | Extra | Adds | Install |
 |---|---|---|
-| [Scrapling](https://github.com/D4Vinci/Scrapling) | Browser-grade TLS/HTTP fingerprint for every request | `pip install "scrapling[fetchers]"` (Python **3.10+**) or `./install.sh scrapling` |
-| A Chromium browser | The `discover` maintenance command | `scrapling install`, or point `--chrome-path` at an existing Chrome |
+| Chrome, Chromium, Edge or Brave | The `discover` maintenance command and the `penyedia` seller commands | Found automatically, or point `--chrome-path` / `INAPROC_CHROME` at it |
 
 </details>
 
@@ -224,6 +224,7 @@ Just talk to your assistant. Indonesian and English both work.
 | `/inaproc siapa penyedia sinzo-mitra-sejati? tampilkan produk terlarisnya` | Seller profile, score and best sellers |
 | `/inaproc reviews for <url>` | Rating summary and buyer reviews |
 | `/inaproc list the jasa categories` | Category tree with IDs |
+| `/inaproc ini file RAB ./RAB.xlsx, ini link perusahaan saya <url>, carikan pembanding minimal 2` | Asks *win* (company stays cheapest, comparisons cost more) or *cheapest*, then builds the one-sheet **Perbandingan** workbook with every product link |
 
 Before fetching anything, the assistant asks you for the **output format** (chat only · JSON · CSV · XLSX · YAML) and the **save location** (this project → `./output/`, or another folder). Answer once per request, or say it upfront: *"…save as csv in ~/Documents"*.
 
@@ -287,6 +288,8 @@ python3 $S --help                      # all commands;  <command> --help for opt
 | `cheapest <words>` | Cheapest matching products | `--pages` `--top` `--strict` `--include-outliers` `--outlier-ratio` + search filters |
 | `detail <url>` | One product in full | `--region` |
 | `compare <url> <url> …` | Side-by-side | `--region` |
+| `read-xlsx <file>` | Print a local .xlsx (e.g. a RAB) | `--sheet`, `--max-rows`, `--json` |
+| `rab-report <spec.json>` | RAB comparison → one-sheet `Perbandingan` workbook ([spec](skills/inaproc/references/rab-comparison.md)) | `--mode win\|cheapest`, `--verify` |
 | `reviews <url>` | Ratings and reviews | `--page` `--per-page` |
 | `seller <slug\|url>` | Seller profile and score | `--products N` |
 | `sellers <words>` | Seller search | `--page` `--per-page` |
@@ -297,32 +300,33 @@ python3 $S --help                      # all commands;  <command> --help for opt
 | `kbli` · `ppn` | KBLI codes · PPN rates | |
 | `raw <op> --vars JSON` · `ops` | Any bundled public GraphQL operation | |
 | `engine` | Shows the HTTP engine and limits in use | |
-| `discover [urls]` | Re-capture the site's API in a stealth browser | `--headed` `--wait S` `--update-queries` `--chrome-path` |
+| `discover [urls]` | Re-capture the site's API in your own Chrome window | `--wait S` `--headless` `--update-queries` `--chrome-path` |
 
-**Options available on every command:** `--json` · `--save json,csv,xlsx,yaml` · `--out-dir DIR` · `--engine auto|stdlib|scrapling` · `--impersonate chrome|firefox|safari…` · `--http3` · `--proxy URL` · `--min-interval S` · `--concurrency 1-4`
+**Options available on every command:** `--json` · `--save json,csv,xlsx,yaml` · `--out-dir DIR` · `--proxy URL` · `--min-interval S` · `--concurrency 1-4`
 
 **Environment variables:** `INAPROC_ENGINE`, `INAPROC_PROXY`, `INAPROC_MIN_INTERVAL`, `INAPROC_CHROME`
 
 </details>
 
 <details>
-<summary><b>Network engine and Scrapling</b></summary>
+<summary><b>Network engine and Chrome</b></summary>
 
 <br>
 
-| Capability | Default (standard library) | With [Scrapling](https://github.com/D4Vinci/Scrapling) |
-|---|---|---|
-| Session management (cookies, keep-alive) | ✅ | ✅ `FetcherSession` |
-| Browser TLS/HTTP fingerprint | browser headers | ✅ `--impersonate`, `--http3` |
-| Concurrent requests (rate-limited) | ✅ `--concurrency 1-4` | ✅ |
-| Your own proxy | ✅ `--proxy` | ✅ |
-| Background API capture · dynamic loading · ad/domain blocking · DNS-over-HTTPS | — | ✅ `discover` |
+| Capability | How |
+|---|---|
+| Session management (cookies, keep-alive) | ✅ built in |
+| Browser-style headers | ✅ Chrome's header set and order, matching User-Agent (TLS fingerprint stays Python's) |
+| Concurrent requests (rate-limited) | ✅ `--concurrency 1-4` |
+| Your own proxy | ✅ `--proxy` |
+| Background API capture · dynamic loading · tracker blocking | ✅ `discover`, driving your own Chrome over the DevTools Protocol |
+
+Removed in v1.1: the optional Scrapling engine. `--engine scrapling`, `--impersonate` and `--http3` are still accepted but only print a warning.
 
 `discover` is a maintenance tool. If the site changes and a command breaks, re-capture the live GraphQL calls:
 
 ```bash
-pip install "scrapling[fetchers]" && scrapling install
-python3 $S discover --headed --wait 60 --update-queries   # click around in the window that opens
+python3 $S discover --wait 60 --update-queries   # click around in the window that opens
 ```
 
 **Deliberately left out:** CAPTCHA/Turnstile solving and proxy rotation for getting around rate limits. The public API needs neither.
@@ -376,7 +380,7 @@ The sandbox blocks the internet. Allow network access to <code>katalog.inaproc.i
 <details>
 <summary><b>A command broke after a site update.</b></summary>
 <br>
-The catalogue's API is internal and can change. Run <code>discover --headed --wait 60 --update-queries</code>, compare <code>queries.discovered.json</code> with <code>queries.json</code>, and open an issue or PR.
+The catalogue's API is internal and can change. Run <code>discover --wait 60 --update-queries</code>, compare <code>queries.discovered.json</code> with <code>queries.json</code>, and open an issue or PR.
 </details>
 
 ---
@@ -387,11 +391,16 @@ The catalogue's API is internal and can change. Run <code>discover --headed --wa
 inaproc/
 ├── skills/inaproc/            ← the skill (this folder is what gets installed)
 │   ├── SKILL.md               ← instructions the assistant follows
-│   ├── scripts/inaproc.py     ← standard-library CLI (Scrapling optional)
+│   ├── scripts/inaproc.py     ← standard-library CLI
+│   ├── scripts/inaproc_chrome.py   ← Chrome DevTools client (discover)
+│   ├── scripts/inaproc_safari.py   ← your own Safari via AppleScript (penyedia)
+│   ├── scripts/inaproc_penyedia.py ← seller commands, plans, apply, write log
 │   ├── scripts/queries.json   ← the 22 public GraphQL operations
+│   ├── scripts/penyedia_queries.json ← the 11 seller product operations
 │   └── references/api.md      ← request format, variables, enums, fields
 ├── codex/prompts/inaproc.md   ← /prompts:inaproc for Codex
 ├── chatgpt/                   ← Custom GPT: instructions, OpenAPI action, queries
+├── tests/                     ← python3 -m unittest discover tests
 ├── install.sh · install.ps1   ← installers (macOS/Linux · Windows)
 └── LICENSE
 ```

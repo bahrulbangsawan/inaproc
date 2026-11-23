@@ -4,7 +4,6 @@
 #   ./install.sh project    → Claude Code, this project only (./.claude/skills/inaproc)
 #   ./install.sh codex      → Codex CLI (~/.codex/skills/inaproc + /prompts:inaproc)
 #   ./install.sh zip        → dist/inaproc.zip for claude.ai / Claude Desktop upload
-#   ./install.sh scrapling  → optional: pip install "scrapling[fetchers]" (browser fingerprint engine)
 #   ./install.sh all        → claude + codex + zip
 #   ./install.sh uninstall  → remove the Claude Code and Codex installs
 set -euo pipefail
@@ -85,13 +84,6 @@ make_zip() {
   echo "  Also enable code execution and allow network access to katalog.inaproc.id."
 }
 
-install_scrapling() {
-  check_python
-  "$PY" -m pip install --upgrade "scrapling[fetchers]"
-  say "Scrapling installed. The script now uses its browser-fingerprint engine automatically."
-  echo "  For the optional 'discover' command also run: scrapling install   (downloads a browser)"
-}
-
 uninstall() {
   rm -rf "$CLAUDE_DIR/skills/inaproc" "$CODEX_DIR/skills/inaproc" "$CODEX_DIR/prompts/inaproc.md"
   say "Removed inaproc from Claude Code ($CLAUDE_DIR) and Codex ($CODEX_DIR)."
@@ -102,7 +94,6 @@ case "${1:-}" in
   project) install_project ;;
   codex) install_codex ;;
   zip) make_zip ;;
-  scrapling) install_scrapling ;;
   all) install_claude; install_codex; make_zip ;;
   uninstall) uninstall ;;
   *) cat <<'USAGE'
@@ -111,7 +102,6 @@ Usage: install.sh <target>
   project    Claude Code, current project only (./.claude/skills/inaproc)
   codex      Codex CLI (~/.codex/skills/inaproc + /prompts:inaproc)
   zip        dist/inaproc.zip for claude.ai / Claude Desktop
-  scrapling  optional: pip install "scrapling[fetchers]"
   all        claude + codex + zip
   uninstall  remove the Claude Code and Codex installs
 USAGE

@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """inaproc — search Indonesia's government e-catalogue (katalog.inaproc.id).
 
-Works with the Python 3.8+ standard library alone. If Scrapling
-(https://github.com/D4Vinci/Scrapling, `pip install "scrapling[fetchers]"`) is
-installed it is used automatically for browser-grade TLS fingerprints and
-headers, and it powers the `discover` command (stealth browser + background
-API capture). Only the public, no-login GraphQL operations are called.
+Works with the Python 3.8+ standard library alone, sending Chrome-style request
+headers. The `discover` command (and the `penyedia` seller commands) drive a
+locally installed Chrome over the DevTools Protocol, with no extra packages.
+The catalogue commands call only the public, no-login GraphQL operations.
 
 Examples:
   python3 inaproc.py search "kertas hvs a4" --sort price-asc --type barang
@@ -13,31 +12,37 @@ Examples:
   python3 inaproc.py cheapest "laptop core i5" --pages 2 --save xlsx,csv --out-dir .
   python3 inaproc.py compare <url1> <url2> --save json --out-dir ~/Documents
   python3 inaproc.py seller anak-terusan --products 10
-  python3 inaproc.py discover --headed            # needs Scrapling + `scrapling install`
+  python3 inaproc.py read-xlsx RAB.xlsx
+  python3 inaproc.py rab-report spec.json --verify --save xlsx --out-dir .
+  python3 inaproc.py discover --wait 60          # needs a local Chrome/Chromium/Edge/Brave
 """
 import argparse
 import csv
+import gzip
+import http.client
+import http.cookies
+import platform
 import datetime as _dt
-import http.cookiejar
 import json
 import os
 import re
 import sys
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 import zipfile
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from xml.sax.saxutils import escape as _xml_escape
 
+# Run as a script, this file is __main__; register it as `inaproc` too so the helper modules beside it
+# (inaproc_penyedia) share these classes instead of importing a second copy.
+sys.modules.setdefault("inaproc", sys.modules[__name__])
+
 ENDPOINT = "https://katalog.inaproc.id/graphql"
 SITE = "https://katalog.inaproc.id"
-UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/131.0 Safari/537.36")
-BASE_HEADERS = {"content-type": "application/json", "accept": "application/json",
-                "referer": SITE + "/", "origin": SITE}
+VERSION = "1.2.0"
+CHROME_MAJOR = 158  # keep User-Agent and sec-ch-ua on the same Chrome version
 MIN_INTERVAL_FLOOR = 0.5   # never faster than 2 request starts per second, whatever the flags say
 MAX_CONCURRENCY = 4
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -78,79 +83,136 @@ class RateLimiter:
             time.sleep(start - now)
 
 
-def _scrapling_available():
-    try:
-        import scrapling.fetchers  # noqa: F401
-        return True
-    except Exception:
-        return False
+
+def chrome_platform():
+    sysname = platform.system()
+    return {"Darwin": "macOS", "Windows": "Windows"}.get(sysname, "Linux")
+
+
+def user_agent():
+    os_part = {"macOS": "Macintosh; Intel Mac OS X 10_15_7", "Windows": "Windows NT 10.0; Win64; x64",
+               "Linux": "X11; Linux x86_64"}[chrome_platform()]
+    return (f"Mozilla/5.0 ({os_part}) AppleWebKit/537.36 (KHTML, like Gecko) "
+            f"Chrome/{CHROME_MAJOR}.0.0.0 Safari/537.36")
+
+
+def chrome_headers(body_len, cookie, host="katalog.inaproc.id"):
+    """Headers for a same-origin GraphQL fetch, in the order Chrome sends them over HTTP/1.1."""
+    sec_ch_ua = (f'"Chromium";v="{CHROME_MAJOR}", "Google Chrome";v="{CHROME_MAJOR}", '
+                 '"Not_A Brand";v="99"')
+    h = [("Host", host), ("Connection", "keep-alive"), ("Content-Length", str(body_len)),
+         ("sec-ch-ua-platform", f'"{chrome_platform()}"'), ("User-Agent", user_agent()),
+         ("sec-ch-ua", sec_ch_ua), ("Content-Type", "application/json"), ("sec-ch-ua-mobile", "?0"),
+         ("Accept", "application/json"), ("Origin", SITE), ("Sec-Fetch-Site", "same-origin"),
+         ("Sec-Fetch-Mode", "cors"), ("Sec-Fetch-Dest", "empty"), ("Referer", SITE + "/"),
+         ("Accept-Encoding", "gzip, deflate"), ("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")]
+    if cookie:
+        h.append(("Cookie", cookie))
+    return h
+
+
+class CookieStore:
+    """Cookies set by the one host this client talks to (name -> value, insertion ordered)."""
+
+    def __init__(self):
+        self._c = {}
+        self._lock = threading.Lock()
+
+    def update(self, set_cookie_headers):
+        with self._lock:
+            for raw in set_cookie_headers:
+                jar = http.cookies.SimpleCookie()
+                try:
+                    jar.load(raw)
+                except http.cookies.CookieError:
+                    continue
+                for name, morsel in jar.items():
+                    self._c[name] = morsel.value
+
+    def header(self):
+        with self._lock:
+            return "; ".join(f"{k}={v}" for k, v in self._c.items()) or None
+
+
+def _decode_body(raw, encoding):
+    encoding = (encoding or "").lower()
+    if encoding == "gzip":
+        raw = gzip.decompress(raw)
+    elif encoding == "deflate":
+        try:
+            raw = zlib.decompress(raw)
+        except zlib.error:
+            raw = zlib.decompress(raw, -zlib.MAX_WBITS)
+    return raw.decode("utf-8", "replace")
 
 
 class Client:
-    """One persistent session for the whole run (cookies + keep-alive).
+    """One persistent session for the whole run (cookies + keep-alive), standard library only."""
 
-    engine "scrapling": Scrapling FetcherSession (curl_cffi) with a real browser
-    TLS/HTTP fingerprint and matching stealth headers, one session per thread.
-    engine "stdlib": urllib with a shared cookie jar.
-    """
+    engine = "stdlib"
 
-    def __init__(self, engine="auto", impersonate="chrome", http3=False, proxy=None,
-                 min_interval=1.0, concurrency=1, timeout=30):
+    def __init__(self, proxy=None, min_interval=1.0, concurrency=1, timeout=30, endpoint=ENDPOINT):
         self.limiter = RateLimiter(min_interval)
         self.concurrency = max(1, min(MAX_CONCURRENCY, concurrency))
         self.timeout = timeout
         self.proxy = proxy
-        self.impersonate = impersonate
-        self.http3 = http3
         self._local = threading.local()
-        self._sessions = []
+        self._conns = []
         self._lock = threading.Lock()
-        if engine == "auto":
-            engine = "scrapling" if _scrapling_available() else "stdlib"
-        if engine == "scrapling" and not _scrapling_available():
-            raise InaprocError('engine "scrapling" requested but Scrapling is not installed: '
-                               'pip install "scrapling[fetchers]"')
-        self.engine = engine
-        if engine == "stdlib":
-            handlers = [urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())]
-            if proxy:
-                handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-            self._opener = urllib.request.build_opener(*handlers)
+        self.cookies = CookieStore()
+        u = urllib.parse.urlsplit(endpoint)
+        self._scheme, self._host, self._port = u.scheme, u.hostname, u.port
+        self._path = u.path or "/"
+        self._host_header = "katalog.inaproc.id" if endpoint == ENDPOINT else u.netloc
 
-    def _post_stdlib(self, body):
-        req = urllib.request.Request(ENDPOINT, data=body, headers=dict(BASE_HEADERS, **{"user-agent": UA}),
-                                     method="POST")
-        try:
-            with self._opener.open(req, timeout=self.timeout) as resp:
-                return resp.status, resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as e:
-            return e.code, e.read().decode("utf-8", "replace")
+    def _new_conn(self):
+        cls = http.client.HTTPSConnection if self._scheme == "https" else http.client.HTTPConnection
+        if self.proxy:
+            p = urllib.parse.urlsplit(self.proxy)
+            conn = cls(p.hostname, p.port or (443 if p.scheme == "https" else 80), timeout=self.timeout)
+            headers = {}
+            if p.username:
+                import base64
+                cred = f"{urllib.parse.unquote(p.username)}:{urllib.parse.unquote(p.password or '')}"
+                headers["Proxy-Authorization"] = "Basic " + base64.b64encode(cred.encode()).decode()
+            conn.set_tunnel(self._host, self._port or (443 if self._scheme == "https" else 80), headers=headers)
+        else:
+            conn = cls(self._host, self._port, timeout=self.timeout)
+        with self._lock:
+            self._conns.append(conn)
+        return conn
 
-    def _session(self):
-        s = getattr(self._local, "session", None)
-        if s is None:
-            from scrapling.fetchers import FetcherSession
-            kwargs = dict(impersonate=self.impersonate, stealthy_headers=True, http3=self.http3,
-                          timeout=self.timeout, retries=1, follow_redirects="safe")
-            if self.proxy:
-                kwargs["proxy"] = self.proxy
-            cm = FetcherSession(**kwargs)
-            s = cm.__enter__()
-            self._local.session = s
-            with self._lock:
-                self._sessions.append(cm)
-        return s
-
-    def _post_scrapling(self, body):
-        r = self._session().post(ENDPOINT, data=body, headers=BASE_HEADERS)
-        raw = r.body if isinstance(r.body, (bytes, bytearray)) else str(r.body).encode()
-        return r.status, raw.decode("utf-8", "replace")
+    def _post(self, body):
+        """POST one GraphQL body with Chrome-ordered headers on this thread's keep-alive connection."""
+        for attempt in (0, 1):
+            conn = getattr(self._local, "conn", None)
+            if conn is None:
+                conn = self._local.conn = self._new_conn()
+            try:
+                conn.putrequest("POST", self._path, skip_host=True, skip_accept_encoding=True)
+                for k, v in chrome_headers(len(body), self.cookies.header(), host=self._host_header):
+                    conn.putheader(k, v)
+                conn.endheaders(body)
+                resp = conn.getresponse()
+                raw = resp.read()
+            except (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError,
+                    http.client.CannotSendRequest, http.client.ResponseNotReady):
+                conn.close()
+                self._local.conn = None
+                if attempt:
+                    raise
+                continue
+            self.cookies.update(resp.headers.get_all("Set-Cookie") or [])
+            if (resp.getheader("Connection") or "").lower() == "close":
+                conn.close()
+                self._local.conn = None
+            return resp.status, _decode_body(raw, resp.getheader("Content-Encoding"))
 
     def gql(self, op, variables):
         if op not in QUERIES:
             raise InaprocError(f"unknown operation {op!r}; run `ops` to list them")
         body = json.dumps({"operationName": op, "query": QUERIES[op], "variables": variables}).encode()
-        post = self._post_scrapling if self.engine == "scrapling" else self._post_stdlib
+        post = self._post
         for attempt in range(3):
             self.limiter.wait()
             try:
@@ -193,9 +255,11 @@ class Client:
             return list(pool.map(lambda c: self.gql(*c), calls))
 
     def close(self):
-        for cm in self._sessions:
+        with self._lock:
+            conns, self._conns = self._conns, []
+        for conn in conns:
             try:
-                cm.__exit__(None, None, None)
+                conn.close()
             except Exception:
                 pass
 
@@ -260,9 +324,9 @@ def cell(v, width=60):
     return s if len(s) <= width else s[: width - 1] + "…"
 
 
-def table(headers, rows):
+def table(headers, rows, width=60):
     out = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
-    out += ["| " + " | ".join(cell(c) for c in r) + " |" for r in rows]
+    out += ["| " + " | ".join(cell(c, width) for c in r) + " |" for r in rows]
     return "\n".join(out)
 
 
@@ -872,62 +936,77 @@ def cmd_ops(a):
 
 
 def cmd_engine(a):
-    print(json.dumps({"engine": CLIENT.engine, "scraplingInstalled": _scrapling_available(),
-                      "impersonate": CLIENT.impersonate if CLIENT.engine == "scrapling" else None,
-                      "http3": CLIENT.http3, "minInterval": CLIENT.limiter.interval,
+    print(json.dumps({"version": VERSION, "engine": CLIENT.engine, "minInterval": CLIENT.limiter.interval,
                       "concurrency": CLIENT.concurrency, "proxy": bool(CLIENT.proxy)}, indent=2))
 
 
 # ======================================================================= discover (browser)
+TRACKERS = ["*google-analytics.com*", "*googletagmanager.com*", "*clarity.ms*", "*facebook.net*",
+            "*doubleclick.net*"]
+
+
+def capture_graphql(tab, urls, wait_s=0):
+    """Open each URL in `tab` and return every GraphQL POST the pages send (first seen per operation)."""
+    reqs, status = {}, {}
+
+    def sent(p):
+        r = p.get("request", {})
+        if r.get("method") == "POST" and "/graphql" in r.get("url", ""):
+            reqs[p["requestId"]] = {"url": r["url"], "page": p.get("documentURL") or r["url"],
+                                    "body": r.get("postData"), "hasBody": r.get("hasPostData")}
+
+    def got(p):
+        status[p["requestId"]] = p.get("response", {}).get("status")
+
+    tab.on("Network.requestWillBeSent", sent)
+    tab.on("Network.responseReceived", got)
+    tab.block_urls(TRACKERS)
+    tab.send("Page.enable")
+    for u in urls:
+        tab.navigate(u)
+        tab.wait_load(timeout=60)
+        tab.wait_network_idle(quiet_ms=500, timeout=60)
+        if wait_s:
+            time.sleep(wait_s)
+            tab.wait_network_idle(quiet_ms=500, timeout=30)
+    found = {}
+    for rid, r in reqs.items():
+        body = r["body"]
+        if body is None and r["hasBody"]:
+            try:
+                body = tab.send("Network.getRequestPostData", {"requestId": rid}).get("postData")
+            except Exception:
+                body = None
+        try:
+            req = json.loads(body or "")
+        except ValueError:
+            continue
+        for item in req if isinstance(req, list) else [req]:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("operationName") or "(anonymous)"
+            found.setdefault(name, {"operationName": name, "status": status.get(rid), "page": r["page"],
+                                    "query": item.get("query"), "exampleVariables": item.get("variables")})
+    return sorted(found.values(), key=lambda o: o["operationName"])
+
+
 def cmd_discover(a):
-    """Open catalogue pages in Scrapling's stealth browser, record the site's own GraphQL calls in
-    the background and list (optionally save) every operation seen. Use it to refresh the queries
-    when the site changes. Needs: pip install "scrapling[fetchers]" && scrapling install."""
-    try:
-        from scrapling.fetchers import StealthySession
-    except Exception:
-        raise InaprocError('discover needs Scrapling with browsers: pip install "scrapling[fetchers]" '
-                           "&& scrapling install")
+    """Open catalogue pages in a never-logged-in Chrome profile, record the site's own GraphQL calls over the
+    DevTools Protocol and list (optionally save) every operation seen. Use it to refresh the queries when the
+    site changes. Needs a local Chrome, Chromium, Edge or Brave; no pip packages."""
     kw = urllib.parse.quote(a.keyword or "kertas")
     urls = a.urls or [SITE + "/", f"{SITE}/search?keyword={kw}", f"{SITE}/search?keyword={kw}&tabActive=SEARCH_SELLER"]
     for u in urls:
         if not re.match(r"^https://(www\.)?katalog\.inaproc\.id(/|$)", u):
             raise InaprocError(f"discover only opens katalog.inaproc.id pages, not {u}")
-    opts = dict(headless=not a.headed, record_requests=True, max_recorded_requests=2000,
-                block_ads=True, dns_over_https=True, disable_resources=True,
-                blocked_domains={"google-analytics.com", "googletagmanager.com", "clarity.ms",
-                                 "facebook.net", "doubleclick.net"})
-    if a.proxy:
-        opts["proxy"] = a.proxy
-    chrome = a.chrome_path or os.environ.get("INAPROC_CHROME")
-    if chrome:
-        opts["executable_path"] = chrome
-    found, records = {}, []
+    import inaproc_chrome as ic
     try:
-        with StealthySession(**opts) as session:
-            for u in urls:
-                session.fetch(u, network_idle=True, timeout=60000 + int(a.wait * 1000),
-                              wait=int(a.wait * 1000))
-            records = session.network.search(url_pattern=r"/graphql", method="POST", limit=None)
-    except Exception as e:
-        msg = str(e).splitlines()[0][:200]
-        if "Executable doesn't exist" in str(e) or "executable" in msg.lower():
-            raise InaprocError("no browser for Scrapling yet: run `scrapling install` once, or pass "
-                               "--chrome-path /path/to/Chrome (or set INAPROC_CHROME)")
-        raise InaprocError(f"browser capture failed: {msg}")
-    for rec in records:
-        raw = rec.meta.get("request_body") or b""
-        try:
-            req = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
-        except Exception:
-            continue
-        for r in req if isinstance(req, list) else [req]:
-            name = r.get("operationName") or "(anonymous)"
-            found.setdefault(name, {"operationName": name, "status": rec.status, "page": rec.url,
-                                    "query": r.get("query"), "exampleVariables": r.get("variables")})
-    ops = sorted(found.values(), key=lambda o: o["operationName"])
+        with ic.Browser.start("chrome-public", headed=not a.headless, chrome_path=a.chrome_path, proxy=a.proxy) as b:
+            ops = capture_graphql(b.new_tab("about:blank"), urls, wait_s=a.wait)
+    except ic.ChromeError as e:
+        raise InaprocError(str(e))
     md = (f"**{len(ops)} GraphQL operation(s) captured** from {len(urls)} page(s) "
-          "(stealth browser, ads and trackers blocked, DNS over HTTPS)\n\n"
+          "(your Chrome on a separate never-logged-in profile, trackers blocked)\n\n"
           + table(["Operation", "HTTP", "Known to this tool"],
                   [[o["operationName"], o["status"], "yes" if o["operationName"] in QUERIES else "new"] for o in ops]))
     if a.update_queries:
@@ -937,6 +1016,531 @@ def cmd_discover(a):
         md += f"\n\nWrote {path}. Review it, then merge what you need into queries.json."
     emit(a, "discover", "capture", {"operations": ops}, md,
          {"operations": [{k: v for k, v in o.items() if k != "query"} for o in ops]})
+
+
+# ======================================================================= RAB comparison (Perbandingan)
+_NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_NS_PKG = "http://schemas.openxmlformats.org/package/2006/relationships"
+
+
+def _xlsx_cell_ref(ref):
+    m = re.match(r"([A-Z]+)(\d+)", ref)
+    col = 0
+    for ch in m.group(1):
+        col = col * 26 + ord(ch) - 64
+    return col, int(m.group(2))
+
+
+def read_xlsx(path, sheet=None):
+    """Standard-library .xlsx reader: {sheet name: [[cell values]]} (values only, formulas give cached results)."""
+    import xml.etree.ElementTree as ET
+    ns = {"m": _NS_MAIN, "r": _NS_REL}
+    with zipfile.ZipFile(path) as z:
+        names = set(z.namelist())
+        shared = []
+        if "xl/sharedStrings.xml" in names:
+            for si in ET.fromstring(z.read("xl/sharedStrings.xml")).findall("m:si", ns):
+                shared.append("".join(t.text or "" for t in si.iter(f"{{{_NS_MAIN}}}t")))
+        wb = ET.fromstring(z.read("xl/workbook.xml"))
+        rels = {r.get("Id"): r.get("Target") for r in ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))}
+        out = {}
+        for s in wb.find("m:sheets", ns):
+            name = s.get("name")
+            if sheet and name.lower() != str(sheet).lower():
+                continue
+            target = rels[s.get(f"{{{_NS_REL}}}id")].lstrip("/")
+            target = target if target.startswith("xl/") else "xl/" + target
+            rows = {}
+            for c in ET.fromstring(z.read(target)).iter(f"{{{_NS_MAIN}}}c"):
+                col, row = _xlsx_cell_ref(c.get("r"))
+                t, v = c.get("t"), c.find("m:v", ns)
+                if t == "s" and v is not None:
+                    val = shared[int(v.text)]
+                elif t == "inlineStr":
+                    val = "".join(x.text or "" for x in c.iter(f"{{{_NS_MAIN}}}t"))
+                elif v is None or v.text is None:
+                    continue
+                elif t in ("str", "e"):
+                    val = v.text
+                elif t == "b":
+                    val = v.text == "1"
+                else:
+                    try:
+                        f = float(v.text)
+                        val = int(f) if f.is_integer() else f
+                    except ValueError:
+                        val = v.text
+                if val == "":
+                    continue
+                rows.setdefault(row, {})[col] = val
+            grid = []
+            for r in range(1, max(rows, default=0) + 1):
+                cells = rows.get(r, {})
+                grid.append([cells.get(i) for i in range(1, max(cells, default=0) + 1)])
+            out[name] = grid
+        if sheet and not out:
+            raise InaprocError(f"sheet {sheet!r} not found in {path}")
+        return out
+
+
+def cmd_read_xlsx(a):
+    if not os.path.exists(a.file):
+        raise InaprocError(f"file not found: {a.file}")
+    data = read_xlsx(a.file, a.sheet)
+    if a.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+        return
+    for name, grid in data.items():
+        print(f"## Sheet: {name} ({len(grid)} rows)\n")
+        width = max((len(r) for r in grid), default=0)
+        if not width:
+            print("_empty_\n")
+            continue
+        print(table(["Row"] + [_col(i) for i in range(1, width + 1)],
+                    [[i] + [cell(v, 50) for v in r] + [""] * (width - len(r))
+                     for i, r in enumerate(grid[: a.max_rows], 1) if any(v not in (None, "") for v in r)]))
+        if len(grid) > a.max_rows:
+            print(f"\n… {len(grid) - a.max_rows} more rows (use --max-rows)")
+        print()
+
+
+# Group colours of the "Perbandingan" sheet: RAB, company, alternatives, conclusion.
+_PB_RAB, _PB_COMPANY, _PB_CONCL = "44546A", "C55A11", "7030A0"
+_PB_ALTS = ["2E75B6", "548235", "7F6000", "833C0B", "1F4E78"]
+_PB_WIN_FILL = "E2EFDA"
+
+
+def _num(v):
+    if v is None or v == "":
+        return None
+    if isinstance(v, (int, float)):
+        return v
+    s = re.sub(r"[^\d,.\-]", "", str(v))
+    if re.search(r"\d\.\d{3}(\.|$)", s) or ("," in s and "." in s and s.rfind(",") > s.rfind(".")):
+        s = s.replace(".", "").replace(",", ".")  # Indonesian 1.234.567,89
+    s = s.replace(",", "")
+    try:
+        f = float(s)
+    except ValueError:
+        return None
+    return int(f) if f.is_integer() else f
+
+
+def _excluded(alt):
+    return bool(alt.get("exclude")) or str(alt.get("kesesuaian") or "").strip().lower().startswith("berbeda")
+
+
+def build_perbandingan(spec):
+    """Normalise a comparison spec and compute totals, the per-item conclusion and warnings."""
+    mode = (spec.get("mode") or "cheapest").lower()
+    if mode not in ("win", "cheapest"):
+        raise InaprocError("spec.mode must be 'win' (company wins) or 'cheapest' (find the cheapest)")
+    comp = spec.get("company") or {}
+    cname = comp.get("name") or "PERUSAHAAN"
+    loc = ", ".join(x for x in (comp.get("city"), comp.get("province")) if x)
+    clabel = comp.get("label") or (f"{cname.upper()} ({loc})" if loc else cname.upper())
+    items = spec.get("items") or []
+    if not items:
+        raise InaprocError("spec.items is empty: list every RAB line")
+    n_alt = max(int(spec.get("alternatives", 2) or 2), max(len(i.get("alternatives") or []) for i in items), 2)
+    warnings, rows = [], []
+    for idx, it in enumerate(items, 1):
+        no = it.get("no", idx)
+        qty = _num(it.get("qty")) or 0
+        rab = _num(it.get("harga_rab"))
+        c = dict(it.get("company") or {})
+        c["harga_ppn"], c["harga_sblm_ppn"] = _num(c.get("harga_ppn")), _num(c.get("harga_sblm_ppn"))
+        alts = []
+        for alt in (it.get("alternatives") or [])[:n_alt]:
+            alt = dict(alt)
+            alt["harga_ppn"] = _num(alt.get("harga_ppn"))
+            alts.append(alt)
+        label = f"item {no} ({it.get('uraian') or '-'})"
+        if not c.get("url") and c.get("harga_ppn") is not None:
+            warnings.append(f"{label}: company price has no product URL")
+        for k, alt in enumerate(alts, 1):
+            if not alt.get("url"):
+                warnings.append(f"{label}: alternative {k} has no product URL")
+            if alt.get("harga_ppn") is None:
+                warnings.append(f"{label}: alternative {k} has no price")
+        usable = [a_ for a_ in alts if not _excluded(a_) and a_.get("harga_ppn") is not None]
+        if len(alts) < 2:
+            warnings.append(f"{label}: only {len(alts)} comparison product(s); at least 2 are required")
+        cp = c.get("harga_ppn")
+        if mode == "win":
+            if cp is None:
+                warnings.append(f"{label}: no company product/price, the company cannot win this line")
+            else:
+                for k, alt in enumerate(alts, 1):
+                    if alt.get("harga_ppn") is not None and alt["harga_ppn"] <= cp:
+                        warnings.append(f"{label}: alternative {k} ({alt.get('penyedia')}) Rp{alt['harga_ppn']:,.0f} "
+                                        f"is not more expensive than the company Rp{cp:,.0f}".replace(",", "."))
+        # conclusion: the cheapest comparable offer (company included), unless the spec sets one
+        cands = ([(cp, cname, True)] if cp is not None else []) + \
+                [(a_["harga_ppn"], a_.get("penyedia") or "-", False) for a_ in usable]
+        concl = dict(it.get("kesimpulan") or {})
+        if cands and not concl.get("penyedia"):
+            best = min(cands, key=lambda x: (x[0], not x[2]))
+            concl.setdefault("penyedia", best[1])
+            concl.setdefault("harga_ppn", best[0])
+            concl["company_wins"] = best[2]
+        else:
+            concl["harga_ppn"] = _num(concl.get("harga_ppn"))
+            concl["company_wins"] = (concl.get("penyedia") or "").strip().lower() == cname.strip().lower()
+        concl["jumlah"] = qty * concl["harga_ppn"] if concl.get("harga_ppn") is not None else None
+        concl["catatan"] = it.get("catatan") or concl.get("catatan") or ""
+        rows.append({"no": no, "uraian": it.get("uraian"), "ukuran": it.get("ukuran") or "-", "qty": qty,
+                     "satuan": it.get("satuan"), "harga_rab": rab,
+                     "jumlah_rab": qty * rab if rab is not None else None,
+                     "company": c, "alternatives": alts, "kesimpulan": concl})
+    tot = {"rab": sum(r["jumlah_rab"] or 0 for r in rows),
+           "company": sum(r["qty"] * r["company"]["harga_ppn"] for r in rows if r["company"].get("harga_ppn") is not None),
+           "termurah": sum(r["kesimpulan"]["jumlah"] or 0 for r in rows),
+           "alternatives": [sum(r["qty"] * r["alternatives"][k]["harga_ppn"] for r in rows
+                                if len(r["alternatives"]) > k and r["alternatives"][k].get("harga_ppn") is not None)
+                            for k in range(n_alt)],
+           "company_wins": sum(1 for r in rows if r["kesimpulan"].get("company_wins"))}
+    return {"title": spec.get("title") or "Perbandingan RAB", "mode": mode, "company": dict(comp, name=cname, label=clabel),
+            "n_alt": n_alt, "items": rows, "totals": tot, "warnings": warnings}
+
+
+def _pb_styles(n_alt):
+    """styles.xml for the Perbandingan sheet; returns (xml, style index map)."""
+    group_fills = [_PB_RAB, _PB_COMPANY] + [_PB_ALTS[k % len(_PB_ALTS)] for k in range(n_alt)] + [_PB_CONCL]
+    fills = ['<fill><patternFill patternType="none"/></fill>', '<fill><patternFill patternType="gray125"/></fill>']
+    fills += [f'<fill><patternFill patternType="solid"><fgColor rgb="FF{c}"/></patternFill></fill>'
+              for c in group_fills + [_PB_WIN_FILL]]
+    win_fill = len(fills) - 1
+    fonts = ('<fonts count="4"><font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/>'
+             '<scheme val="minor"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>'
+             '<font><u/><sz val="11"/><color rgb="FF0563C1"/><name val="Calibri"/></font>'
+             '<font><b/><sz val="11"/><name val="Calibri"/></font></fonts>')
+    border = ('<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border>'
+              + "".join(f'<{s} style="thin"><color rgb="FFBFBFBF"/></{s}>' for s in ("left", "right", "top", "bottom"))
+              + "<diagonal/></border></borders>")
+    xfs, st = ['<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'], {}
+
+    def add(key, num=0, font=0, fill=0, bord=0, align=""):
+        st[key] = len(xfs)
+        xfs.append(f'<xf numFmtId="{num}" fontId="{font}" fillId="{fill}" borderId="{bord}" xfId="0" applyNumberFormat="1"'
+                   f' applyFont="1" applyFill="1" applyBorder="1"' + (f' applyAlignment="1"><alignment {align}/></xf>'
+                                                                       if align else "/>"))
+    for g in range(len(group_fills)):
+        add(("group", g), font=1, fill=2 + g, align='horizontal="center"')
+        add(("head", g), font=1, fill=2 + g, bord=1, align='horizontal="center" vertical="center" wrapText="1"')
+    top = 'vertical="top" wrapText="1"'
+    add("text", bord=1, align=top)
+    add("money", num=164, bord=1, align=top)
+    add("link", font=2, bord=1, align=top)
+    add("win", fill=win_fill, bord=1, align=top)
+    add("total", num=164, font=3, bord=1)
+    add("bold", font=3)
+    xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+           f'<styleSheet xmlns="{_NS_MAIN}"><numFmts count="1"><numFmt numFmtId="164" formatCode="&quot;Rp&quot;#,##0"/>'
+           f'</numFmts>{fonts}<fills count="{len(fills)}">{"".join(fills)}</fills>{border}'
+           '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+           f'<cellXfs count="{len(xfs)}">{"".join(xfs)}</cellXfs>'
+           '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>')
+    return xml, st
+
+
+def write_perbandingan_xlsx(path, rep):
+    """One-sheet workbook, sheet "Perbandingan", laid out like the reference comparison workbook."""
+    n_alt = rep["n_alt"]
+    xml_styles, st = _pb_styles(n_alt)
+    groups = [("KEBUTUHAN RAB", ["No", "Uraian", "Ukuran", "Qty", "Satuan", "Harga Satuan RAB", "Jumlah RAB"],
+               [5, 34, 14, 6, 8, 13, 14]),
+              (rep["company"]["label"], ["Varian", "Harga sblm PPN", "Harga incl. PPN", "Jumlah incl. PPN",
+                                                 "Selisih vs RAB", "URL"], [20, 13, 13, 14, 13, 30])]
+    groups += [(f"ALTERNATIF {k + 1}", ["Penyedia", "Kota", "Spesifikasi / Ukuran", "Kesesuaian", "Satuan",
+                                        "Harga incl. PPN", "Jumlah incl. PPN", "URL"], [20, 14, 36, 20, 9, 13, 14, 30])
+               for k in range(n_alt)]
+    groups.append(("KESIMPULAN", ["Termurah (sebanding)", "Jumlah termurah", "Catatan"], [22, 14, 45]))
+    start, col = [], 1
+    for g in groups:
+        start.append(col)
+        col += len(g[1])
+    last_col = col - 1
+    widths = [w for g in groups for w in g[2]]
+
+    cells_by_row, links, merges = {}, [], []
+
+    def put(r, c, v, style, formula=None):
+        ref = f"{_col(c)}{r}"
+        s = f' s="{st[style]}"' if style is not None else ""
+        if formula:
+            cv = "" if v is None else f"<v>{v}</v>"
+            x = f'<c r="{ref}"{s}><f>{_xml_escape(formula)}</f>{cv}</c>'
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+            x = f'<c r="{ref}"{s}><v>{v}</v></c>'
+        elif v is None or v == "":
+            x = f'<c r="{ref}"{s}/>'
+        else:
+            t = _xml_escape(_ILLEGAL_XML.sub("", str(v))[:32767])
+            x = f'<c r="{ref}"{s} t="inlineStr"><is><t xml:space="preserve">{t}</t></is></c>'
+        cells_by_row.setdefault(r, []).append((c, x))
+        return ref
+
+    for g, (title, heads, _) in enumerate(groups):
+        c0 = start[g]
+        put(1, c0, title, ("group", g))
+        for k in range(1, len(heads)):
+            put(1, c0 + k, None, ("group", g))
+        merges.append(f"{_col(c0)}1:{_col(c0 + len(heads) - 1)}1")
+        for k, h in enumerate(heads):
+            put(2, c0 + k, h, ("head", g))
+
+    def money(v):
+        return v if v is not None else None
+
+    first, r = 3, 2
+    for it in rep["items"]:
+        r += 1
+        C = lambda c: f"{_col(c)}{r}"  # noqa: E731
+        q = it["qty"]
+        put(r, 1, it["no"], "text")
+        put(r, 2, it["uraian"], "text")
+        put(r, 3, it["ukuran"], "text")
+        put(r, 4, q, "text")
+        put(r, 5, it["satuan"], "text")
+        put(r, 6, money(it["harga_rab"]), "money")
+        put(r, 7, it["jumlah_rab"], "money", f"{C(4)}*{C(6)}" if it["harga_rab"] is not None else None)
+        c = it["company"]
+        b = start[1]
+        put(r, b, c.get("varian"), "text")
+        put(r, b + 1, money(c.get("harga_sblm_ppn")), "money")
+        put(r, b + 2, money(c.get("harga_ppn")), "money")
+        if c.get("harga_ppn") is not None:
+            put(r, b + 3, q * c["harga_ppn"], "money", f"{C(4)}*{C(b + 2)}")
+            put(r, b + 4, q * c["harga_ppn"] - (it["jumlah_rab"] or 0), "money", f"{C(b + 3)}-{C(7)}")
+        else:
+            put(r, b + 3, None, "money")
+            put(r, b + 4, None, "money")
+        if c.get("url"):
+            links.append((put(r, b + 5, c["url"], "link"), c["url"]))
+        else:
+            put(r, b + 5, None, "text")
+        for k in range(n_alt):
+            b = start[2 + k]
+            alt = it["alternatives"][k] if k < len(it["alternatives"]) else {}
+            put(r, b, alt.get("penyedia"), "text")
+            put(r, b + 1, alt.get("kota"), "text")
+            put(r, b + 2, alt.get("spesifikasi"), "text")
+            put(r, b + 3, alt.get("kesesuaian"), "text")
+            put(r, b + 4, alt.get("satuan"), "text")
+            put(r, b + 5, money(alt.get("harga_ppn")), "money")
+            put(r, b + 6, q * alt["harga_ppn"] if alt.get("harga_ppn") is not None else None, "money",
+                f"{C(4)}*{C(b + 5)}" if alt.get("harga_ppn") is not None else None)
+            if alt.get("url"):
+                links.append((put(r, b + 7, alt["url"], "link"), alt["url"]))
+            else:
+                put(r, b + 7, None, "text")
+        b, k = start[-1], it["kesimpulan"]
+        # highlight the outcome the user asked for: the company winning (win) or a cheaper offer (cheapest)
+        good = k.get("company_wins") if rep["mode"] == "win" else (k.get("penyedia") and not k.get("company_wins"))
+        put(r, b, k.get("penyedia"), "win" if good else "text")
+        put(r, b + 1, k.get("jumlah"), "money")
+        put(r, b + 2, k.get("catatan"), "text")
+    last = r
+    r += 1
+    put(r, 2, "TOTAL", "bold")
+    sum_cols = [(7, rep["totals"]["rab"]), (start[1] + 3, rep["totals"]["company"]),
+                (start[1] + 4, rep["totals"]["company"] - rep["totals"]["rab"])]
+    sum_cols += [(start[2 + k] + 6, rep["totals"]["alternatives"][k]) for k in range(n_alt)]
+    sum_cols.append((start[-1] + 1, rep["totals"]["termurah"]))
+    for cidx, val in sum_cols:
+        put(r, cidx, val, "total", f"SUM({_col(cidx)}{first}:{_col(cidx)}{last})")
+
+    sheet = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+             f'<worksheet xmlns="{_NS_MAIN}" xmlns:r="{_NS_REL}">',
+             f'<dimension ref="A1:{_col(last_col)}{r}"/>',
+             '<sheetViews><sheetView workbookViewId="0"><pane xSplit="2" ySplit="2" topLeftCell="C3" '
+             'activePane="bottomRight" state="frozen"/><selection pane="topRight"/><selection pane="bottomLeft"/>'
+             '<selection pane="bottomRight" activeCell="A1" sqref="A1"/></sheetView></sheetViews>',
+             '<sheetFormatPr baseColWidth="8" defaultRowHeight="15"/><cols>',
+             "".join(f'<col min="{i}" max="{i}" width="{w}" customWidth="1"/>' for i, w in enumerate(widths, 1)),
+             "</cols><sheetData>"]
+    for rr in sorted(cells_by_row):
+        attrs = ' ht="32" customHeight="1"' if rr == 2 else ""
+        sheet.append(f'<row r="{rr}"{attrs}>' + "".join(x for _, x in sorted(cells_by_row[rr])) + "</row>")
+    sheet.append("</sheetData>")
+    sheet.append(f'<autoFilter ref="A2:{_col(last_col)}{last}"/>')
+    sheet.append(f'<mergeCells count="{len(merges)}">' + "".join(f'<mergeCell ref="{m}"/>' for m in merges)
+                 + "</mergeCells>")
+    if links:
+        sheet.append("<hyperlinks>" + "".join(f'<hyperlink ref="{ref}" r:id="rId{i}"/>'
+                                              for i, (ref, _) in enumerate(links, 1)) + "</hyperlinks>")
+    sheet.append('<pageMargins left="0.75" right="0.75" top="1" bottom="1" header="0.5" footer="0.5"/></worksheet>')
+
+    xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", xml +
+                   '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                   '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                   '<Default Extension="xml" ContentType="application/xml"/>'
+                   '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                   '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+                   '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                   "</Types>")
+        z.writestr("_rels/.rels", xml + f'<Relationships xmlns="{_NS_PKG}">'
+                   f'<Relationship Id="rId1" Type="{_NS_REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+        z.writestr("xl/workbook.xml", xml + f'<workbook xmlns="{_NS_MAIN}" xmlns:r="{_NS_REL}"><sheets>'
+                   '<sheet name="Perbandingan" sheetId="1" r:id="rId1"/></sheets><definedNames>'
+                   f'<definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">'
+                   f"'Perbandingan'!$A$2:${_col(last_col)}${last}</definedName></definedNames>"
+                   '<calcPr calcId="124519" fullCalcOnLoad="1"/></workbook>')
+        z.writestr("xl/_rels/workbook.xml.rels", xml + f'<Relationships xmlns="{_NS_PKG}">'
+                   f'<Relationship Id="rId1" Type="{_NS_REL}/worksheet" Target="worksheets/sheet1.xml"/>'
+                   f'<Relationship Id="rId2" Type="{_NS_REL}/styles" Target="styles.xml"/></Relationships>')
+        z.writestr("xl/styles.xml", xml_styles)
+        z.writestr("xl/worksheets/sheet1.xml", "".join(sheet))
+        if links:
+            z.writestr("xl/worksheets/_rels/sheet1.xml.rels", xml + f'<Relationships xmlns="{_NS_PKG}">'
+                       + "".join(f'<Relationship Id="rId{i}" Type="{_NS_REL}/hyperlink" '
+                                 f'Target="{_xml_escape(u, {chr(34): "&quot;"})}" TargetMode="External"/>'
+                                 for i, (_, u) in enumerate(links, 1)) + "</Relationships>")
+
+
+def _pb_flat_rows(rep):
+    """The Perbandingan sheet as flat rows (CSV): one row per RAB line, group-prefixed column names."""
+    cl = rep["company"]["name"]
+    out = []
+    for it in rep["items"]:
+        c, k = it["company"], it["kesimpulan"]
+        row = {"No": it["no"], "Uraian": it["uraian"], "Ukuran": it["ukuran"], "Qty": it["qty"],
+               "Satuan": it["satuan"], "Harga Satuan RAB": it["harga_rab"], "Jumlah RAB": it["jumlah_rab"],
+               f"{cl} - Varian": c.get("varian"), f"{cl} - Harga sblm PPN": c.get("harga_sblm_ppn"),
+               f"{cl} - Harga incl. PPN": c.get("harga_ppn"),
+               f"{cl} - Jumlah incl. PPN": it["qty"] * c["harga_ppn"] if c.get("harga_ppn") is not None else None,
+               f"{cl} - Selisih vs RAB": (it["qty"] * c["harga_ppn"] - (it["jumlah_rab"] or 0))
+               if c.get("harga_ppn") is not None else None, f"{cl} - URL": c.get("url")}
+        for n in range(rep["n_alt"]):
+            alt = it["alternatives"][n] if n < len(it["alternatives"]) else {}
+            p = f"Alternatif {n + 1} - "
+            row.update({p + "Penyedia": alt.get("penyedia"), p + "Kota": alt.get("kota"),
+                        p + "Spesifikasi / Ukuran": alt.get("spesifikasi"), p + "Kesesuaian": alt.get("kesesuaian"),
+                        p + "Satuan": alt.get("satuan"), p + "Harga incl. PPN": alt.get("harga_ppn"),
+                        p + "Jumlah incl. PPN": it["qty"] * alt["harga_ppn"] if alt.get("harga_ppn") is not None else None,
+                        p + "URL": alt.get("url")})
+        row.update({"Termurah (sebanding)": k.get("penyedia"), "Jumlah termurah": k.get("jumlah"),
+                    "Catatan": k.get("catatan")})
+        out.append(row)
+    return out
+
+
+def _verify_spec(spec):
+    """Re-read every product URL in the spec from the catalogue: fill missing prices/cities, flag stale prices."""
+    refs, notes = [], []
+    for it in spec.get("items") or []:
+        for o in [it.get("company") or {}] + list(it.get("alternatives") or []):
+            if o.get("url") and o["url"] not in refs:
+                refs.append(o["url"])
+    if not refs:
+        return notes
+    print(f"verifying {len(refs)} product URL(s) on {SITE} …", file=sys.stderr)
+    found = {}
+    calls = []
+    for ref in refs:
+        try:
+            u, s = parse_product_ref(ref)
+        except InaprocError as e:
+            notes.append(str(e))
+            continue
+        calls.append((ref, ("getProductBySlug", {"username": u, "slug": s, "regionCode": None})))
+    for (ref, _), d in zip(calls, CLIENT.gql_many([c for _, c in calls])):
+        p = d.get("getProductBySlug")
+        if p:
+            found[ref] = slim_detail(p)
+        else:
+            notes.append(f"product not found (removed or wrong URL): {ref}")
+    for it in spec.get("items") or []:
+        for o in [it.get("company") or {}] + list(it.get("alternatives") or []):
+            d = found.get(o.get("url"))
+            if not d:
+                continue
+            if not o.get("kota") and d.get("sellerCity"):
+                o["kota"] = d["sellerCity"].title()
+            if not o.get("satuan") and d.get("unit"):
+                o["satuan"] = d["unit"]
+            price = _num(o.get("harga_ppn"))
+            vs = [v for v in d["variants"] if v.get("priceWithTax") is not None]
+            if price is None:
+                notes.append(f"{o['url']}: no harga_ppn in spec; catalogue range "
+                             f"{price_range(d['priceMinWithTax'], d['priceMaxWithTax'])}")
+                continue
+            match = [v for v in vs if abs(v["priceWithTax"] - price) < 1]
+            if match:
+                if o is it.get("company") and o.get("harga_sblm_ppn") in (None, ""):
+                    o["harga_sblm_ppn"] = match[0]["price"]
+            elif not vs or not (d["priceMinWithTax"] or 0) - 1 <= price <= (d["priceMaxWithTax"] or 0) + 1:
+                notes.append(f"{o['url']}: spec price {rp(price)} not on the catalogue now "
+                             f"({price_range(d['priceMinWithTax'], d['priceMaxWithTax'])})")
+    return notes
+
+
+def cmd_rab_report(a):
+    if not os.path.exists(a.spec):
+        raise InaprocError(f"spec file not found: {a.spec}")
+    with open(a.spec, encoding="utf-8") as f:
+        spec = json.load(f)
+    if a.mode:
+        spec["mode"] = a.mode
+    notes = _verify_spec(spec) if a.verify else []
+    rep = build_perbandingan(spec)
+    rep["warnings"] = notes + rep["warnings"]
+    t, comp = rep["totals"], rep["company"]["name"]
+    head = ["No", "Uraian", "Qty", "RAB", comp] + [f"Alt {k + 1}" for k in range(rep["n_alt"])] + ["Termurah"]
+    body = []
+    for it in rep["items"]:
+        alts = it["alternatives"]
+        body.append([it["no"], it["uraian"], it["qty"], rp(it["harga_rab"]), rp(it["company"].get("harga_ppn"))]
+                    + [f"{rp(alts[k].get('harga_ppn'))} {alts[k].get('penyedia') or ''}".strip() if k < len(alts) else "-"
+                       for k in range(rep["n_alt"])]
+                    + [f"{it['kesimpulan'].get('penyedia') or '-'}"])
+    lines = [f"## {rep['title']}", f"Mode: **{'perusahaan menang' if rep['mode'] == 'win' else 'cari termurah'}**", "",
+             table(head, body), "",
+             table(["Total", "Rupiah"], [["RAB", rp(t["rab"])], [f"{comp} (incl. PPN)", rp(t["company"])]]
+                   + [[f"Alternatif {k + 1}", rp(v)] for k, v in enumerate(t["alternatives"])]
+                   + [["Termurah sebanding", rp(t["termurah"])],
+                      [f"Baris yang dimenangkan {comp}", f"{t['company_wins']} / {len(rep['items'])}"]])]
+    links = []
+    for it in rep["items"]:
+        for o in [it["company"]] + it["alternatives"]:
+            if o.get("url") and o["url"] not in links:
+                links.append(o["url"])
+    lines += ["", "**Link produk**", ""] + [f"- {u}" for u in links]
+    if rep["warnings"]:
+        lines += ["", "**Perlu dicek**", ""] + [f"- {w}" for w in rep["warnings"]]
+    if a.json:
+        print(json.dumps(rep, ensure_ascii=False, indent=2))
+    else:
+        print("\n".join(lines))
+    if a.save:
+        target = os.path.join(os.path.abspath(os.path.expanduser(a.out_dir)), "output")
+        os.makedirs(target, exist_ok=True)
+        now = _dt.datetime.now().astimezone()
+        stem = f"perbandingan_{slugify(rep['title'])}_{now.strftime('%Y%m%d-%H%M%S')}"
+        meta = {"source": SITE, "command": "rab-report", "query": rep["title"], "generatedAt": now.isoformat(timespec="seconds")}
+        written = []
+        for fmt in a.save:
+            p = os.path.join(target, f"{stem}.{fmt}")
+            if fmt == "xlsx":
+                write_perbandingan_xlsx(p, rep)
+            elif fmt == "json":
+                with open(p, "w", encoding="utf-8") as f:
+                    json.dump({"meta": meta, "data": rep}, f, ensure_ascii=False, indent=2)
+            elif fmt == "yaml":
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write(to_yaml({"meta": meta, "data": rep}) + "\n")
+            elif fmt == "csv":
+                rows = _pb_flat_rows(rep)
+                with open(p, "w", encoding="utf-8-sig", newline="") as f:
+                    w = csv.DictWriter(f, fieldnames=list(rows[0]))
+                    w.writeheader()
+                    w.writerows(rows)
+            written.append(p)
+        print("\nSaved:\n" + "\n".join(f"- {p}" for p in written))
 
 
 # ======================================================================= CLI
@@ -949,15 +1553,17 @@ def build_parser():
     g.add_argument("--out-dir", help="base folder; files go to <out-dir>/output/ (required with --save)")
     n = common.add_argument_group("network")
     n.add_argument("--engine", choices=["auto", "stdlib", "scrapling"], default=os.environ.get("INAPROC_ENGINE", "auto"),
-                   help="HTTP engine (auto = Scrapling if installed, else standard library)")
-    n.add_argument("--impersonate", default="chrome", help="browser fingerprint for the Scrapling engine")
-    n.add_argument("--http3", action="store_true", help="use HTTP/3 (Scrapling engine)")
+                   help="HTTP engine (auto and stdlib both use the built-in engine)")
+    n.add_argument("--impersonate", default=None, help=argparse.SUPPRESS)
+    n.add_argument("--http3", action="store_true", help=argparse.SUPPRESS)
     n.add_argument("--proxy", default=os.environ.get("INAPROC_PROXY"), help="http(s)://user:pass@host:port")
     n.add_argument("--min-interval", type=float, default=float(os.environ.get("INAPROC_MIN_INTERVAL", "1.0")),
                    help=f"seconds between request starts (floor {MIN_INTERVAL_FLOOR})")
     n.add_argument("--concurrency", type=int, default=2, help=f"parallel requests, 1–{MAX_CONCURRENCY}")
 
-    p = argparse.ArgumentParser(prog="inaproc", description="Search katalog.inaproc.id (public data, no login).")
+    p = argparse.ArgumentParser(prog="inaproc", description="Search katalog.inaproc.id (public data, no login), "
+                                "and manage your own penyedia products (`penyedia`).")
+    p.add_argument("--version", action="version", version=f"inaproc {VERSION}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def add(name, fn, help_):
@@ -1038,19 +1644,49 @@ def build_parser():
     s.add_argument("operation")
     s.add_argument("--vars")
 
+    s = add("read-xlsx", cmd_read_xlsx, "print the cells of a local .xlsx file (e.g. a RAB) without extra packages")
+    s.add_argument("file")
+    s.add_argument("--sheet", help="only this sheet")
+    s.add_argument("--max-rows", type=int, default=300)
+
+    s = add("rab-report", cmd_rab_report,
+            "render a RAB comparison spec (JSON) as the one-sheet 'Perbandingan' workbook")
+    s.add_argument("spec", help="path to the comparison spec JSON (see references/rab-comparison.md)")
+    s.add_argument("--mode", choices=["win", "cheapest"], help="override spec.mode")
+    s.add_argument("--verify", action="store_true",
+                   help="re-read every product URL on the catalogue (1 call per unique URL) and flag stale prices")
+
+    import inaproc_penyedia
+    inaproc_penyedia.add_parsers(sub, common)
+
     add("ops", cmd_ops, "list bundled public operations")
     add("engine", cmd_engine, "show which HTTP engine and settings will be used")
 
-    s = add("discover", cmd_discover, "capture the site's API calls in a stealth browser (Scrapling)")
+    s = add("discover", cmd_discover, "capture the site's API calls in your own Chrome (DevTools Protocol)")
     s.add_argument("urls", nargs="*", help="katalog.inaproc.id pages to open (default: home + searches)")
     s.add_argument("--keyword", help="search word for the default search pages")
-    s.add_argument("--headed", action="store_true", help="show the browser window")
+    s.add_argument("--headed", action="store_true", help=argparse.SUPPRESS)  # v1.0 flag; a window is the default now
+    s.add_argument("--headless", action="store_true",
+                   help="no window (the live site's Cloudflare refuses headless Chrome; for local testing)")
     s.add_argument("--wait", type=float, default=0,
-                   help="seconds to keep each page open (with --headed you can click around; "
+                   help="seconds to keep each page open (you can click around in the window; "
                         "first loads are server-rendered, most API calls happen on interaction)")
     s.add_argument("--update-queries", action="store_true", help="write scripts/queries.discovered.json")
-    s.add_argument("--chrome-path", help="use this Chrome/Chromium binary instead of `scrapling install` browsers")
+    s.add_argument("--chrome-path", help="Chrome/Chromium/Edge/Brave binary (default: found automatically, "
+                                         "or $INAPROC_CHROME)")
     return p
+
+
+def compat_warnings(args):
+    """Options kept from v1.0 so old scripts keep running; each one only prints a warning now."""
+    out = []
+    if getattr(args, "engine", None) == "scrapling":
+        out.append("Scrapling support was removed in v1.1; using the built-in engine")
+    if getattr(args, "impersonate", None):
+        out.append("--impersonate is ignored since v1.1 (Scrapling support was removed)")
+    if getattr(args, "http3", False):
+        out.append("--http3 is ignored since v1.1 (Scrapling support was removed)")
+    return out
 
 
 def main(argv=None):
@@ -1065,14 +1701,22 @@ def main(argv=None):
             print("error: --save needs --out-dir (ask the user where to save; files go to <out-dir>/output/)",
                   file=sys.stderr)
             return 2
+    for w in compat_warnings(args):
+        print(f"warning: {w}", file=sys.stderr)
     try:
-        if args.cmd not in ("ops", "discover"):
-            CLIENT = Client(engine=args.engine, impersonate=args.impersonate, http3=args.http3, proxy=args.proxy,
-                            min_interval=args.min_interval, concurrency=args.concurrency)
+        offline = args.cmd in ("ops", "discover", "read-xlsx", "penyedia") or (args.cmd == "rab-report" and not args.verify)
+        if not offline:
+            CLIENT = Client(proxy=args.proxy, min_interval=args.min_interval, concurrency=args.concurrency)
         args.fn(args)
     except InaprocError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    except Exception as e:
+        code = getattr(e, "exit_code", None)
+        if code is None and type(e).__name__ != "ChromeError":
+            raise
+        print(f"error: {e}", file=sys.stderr)
+        return code or 1
     finally:
         if CLIENT:
             CLIENT.close()

@@ -249,3 +249,22 @@ Safety model:
 4. End-to-end acceptance with the owner signed in: `penyedia products` lists the account's products;
    `product create` → `apply` adds a clearly-named test product; `product delete` → `apply` removes
    it; `products` confirms both. Each `apply` is run only after the owner approves that plan.
+
+## 9. Change (2026-11-23, owner's request): penyedia runs in the owner's own Safari
+
+Cloudflare's Turnstile would not pass in the CDP-controlled Chrome for Testing window, and the owner asked to
+use Safari directly. On macOS the `penyedia` commands therefore default to **the owner's normal Safari**
+(`--browser safari`, or `INAPROC_BROWSER=safari|chrome`; Chrome stays available and is the default elsewhere):
+
+- Transport: AppleScript `do JavaScript` in the owner's penyedia.inaproc.id tab (found by URL; opened if
+  missing). API calls are synchronous same-origin `XMLHttpRequest`s inside that tab, so Safari's own cookies
+  and Cloudflare clearance are used. Requires Safari ▸ Settings ▸ Advanced ▸ "Show features for web
+  developers", then Develop ▸ Developer Settings ▸ "Allow JavaScript from Apple Events", and macOS's
+  one-time "control Safari" permission for the terminal app.
+- Login: the owner signs in in Safari as usual; `penyedia login` opens the page and waits (never navigating
+  away from sign-in pages). No cookies are copied anywhere.
+- Recorder: Safari has no DevTools Protocol, so `record` injects a hook into the penyedia tab that logs the
+  page's own fetch/XHR calls (method, URL, headers, body, status, response), drained every second and
+  re-injected after full page loads; redaction as in 5.5. Requests sent during a full page reload (before
+  the hook is back) can be missed.
+- The session check script is synchronous, so it runs unchanged in both browsers.
