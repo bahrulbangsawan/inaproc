@@ -224,6 +224,7 @@ Just talk to your assistant. Indonesian and English both work.
 | `/inaproc siapa penyedia sinzo-mitra-sejati? tampilkan produk terlarisnya` | Seller profile, score and best sellers |
 | `/inaproc reviews for <url>` | Rating summary and buyer reviews |
 | `/inaproc list the jasa categories` | Category tree with IDs |
+| `/inaproc ini file RAB ./RAB.xlsx, ini link perusahaan saya <url>, carikan pembanding minimal 2` | Asks *win* (company stays cheapest, comparisons cost more) or *cheapest*, then builds the one-sheet **Perbandingan** workbook with every product link |
 
 Before fetching anything, the assistant asks you for the **output format** (chat only · JSON · CSV · XLSX · YAML) and the **save location** (this project → `./output/`, or another folder). Answer once per request, or say it upfront: *"…save as csv in ~/Documents"*.
 
@@ -287,6 +288,8 @@ python3 $S --help                      # all commands;  <command> --help for opt
 | `cheapest <words>` | Cheapest matching products | `--pages` `--top` `--strict` `--include-outliers` `--outlier-ratio` + search filters |
 | `detail <url>` | One product in full | `--region` |
 | `compare <url> <url> …` | Side-by-side | `--region` |
+| `read-xlsx <file>` | Print a local .xlsx (e.g. a RAB) | `--sheet`, `--max-rows`, `--json` |
+| `rab-report <spec.json>` | RAB comparison → one-sheet `Perbandingan` workbook ([spec](skills/inaproc/references/rab-comparison.md)) | `--mode win\|cheapest`, `--verify` |
 | `reviews <url>` | Ratings and reviews | `--page` `--per-page` |
 | `seller <slug\|url>` | Seller profile and score | `--products N` |
 | `sellers <words>` | Seller search | `--page` `--per-page` |
