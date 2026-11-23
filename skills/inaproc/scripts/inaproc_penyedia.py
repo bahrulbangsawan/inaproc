@@ -6,6 +6,7 @@ The skill never sees, stores or types the password; the owner signs in in the Ch
 """
 import datetime as _dt
 import hashlib
+import sys
 import json
 import os
 import platform
@@ -105,6 +106,12 @@ def _stamp():
 
 
 # ----------------------------------------------------------------------------- browser + session
+def _progress(label):
+    ui = sys.modules.get("inaproc_ui")
+    if ui is not None:
+        ui.progress(label)
+
+
 def on_penyedia(url):
     u = urllib.parse.urlsplit(url or "")
     return u.scheme == "https" and u.hostname == "penyedia.inaproc.id"
@@ -118,6 +125,7 @@ def open_penyedia(headed=True, keep_open=False, chrome_path=None, path="/product
     """Return (browser, a penyedia tab): the owner's own Safari, or the skill's Chrome profile."""
     if (browser or default_browser()) == "safari":
         import inaproc_safari
+        _progress("Mencari tab penyedia.inaproc.id di Safari")
         sf = inaproc_safari.Safari()
         tab = sf.find_tab(PENYEDIA)
         if tab is None:
@@ -141,6 +149,7 @@ def session_info(tab, navigate=True):
         on_auth = (not on_penyedia(url)) or urllib.parse.urlsplit(url).path.startswith("/auth")
         if on_auth:
             return {"signedIn": False, "pending": True}
+    _progress("Memeriksa sesi login penyedia")
     info = tab.evaluate(SESSION_JS) or {"signedIn": False}
     url = info.get("href") or tab.url()
     if navigate and not on_penyedia(url):
@@ -503,6 +512,7 @@ class SellerClient:
         if op not in ALLOWED_OPS:
             raise InaprocError(f"{op} is not a product operation this tool may send")
         body = json.dumps({"operationName": op, "query": ALLOWED_OPS[op], "variables": variables})
+        _progress(f"Penyedia · {op}")
         # A 502/503/504 on a write may still have reached the origin: retrying could create duplicates.
         retry_on = (429,) if op in WRITE_OPS else (429, 502, 503, 504)
         for attempt in range(3):
@@ -560,6 +570,7 @@ class SellerClient:
         fields = "... on ProductCategory{id kbli kbliCodes{code version} isActive}"
         for start in range(0, len(ids), CATEGORY_BATCH):
             chunk = ids[start:start + CATEGORY_BATCH]
+            _progress(f"Membaca KBLI kategori {start + len(chunk)}/{len(ids)}")
             q = "query CategoryKbliBatch{" + " ".join(
                 f"c{i}:getProductCategory(id:{json.dumps(str(cid))}){{{fields}}}" for i, cid in enumerate(chunk)) + "}"
             self.limiter.wait()

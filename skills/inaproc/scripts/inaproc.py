@@ -41,7 +41,7 @@ sys.modules.setdefault("inaproc", sys.modules[__name__])
 
 ENDPOINT = "https://katalog.inaproc.id/graphql"
 SITE = "https://katalog.inaproc.id"
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 CHROME_MAJOR = 158  # keep User-Agent and sec-ch-ua on the same Chrome version
 MIN_INTERVAL_FLOOR = 0.5   # never faster than 2 request starts per second, whatever the flags say
 MAX_CONCURRENCY = 4
@@ -146,6 +146,13 @@ def _decode_body(raw, encoding):
     return raw.decode("utf-8", "replace")
 
 
+def _progress(label):
+    """Show `label` as the running step when the standalone app's live UI is active (no-op otherwise)."""
+    ui = sys.modules.get("inaproc_ui")
+    if ui is not None:
+        ui.progress(label)
+
+
 class Client:
     """One persistent session for the whole run (cookies + keep-alive), standard library only."""
 
@@ -209,6 +216,7 @@ class Client:
             return resp.status, _decode_body(raw, resp.getheader("Content-Encoding"))
 
     def gql(self, op, variables):
+        _progress(f"Katalog · {op}")
         if op not in QUERIES:
             raise InaprocError(f"unknown operation {op!r}; run `ops` to list them")
         body = json.dumps({"operationName": op, "query": QUERIES[op], "variables": variables}).encode()

@@ -50,12 +50,30 @@ smoke() {  # $1 = installed skill folder
   else echo "  ! installed, but the live check failed (offline or rate-limited?). Try: $PY $1/scripts/inaproc.py ppn"; fi
 }
 
+install_launcher() {  # $1 = installed skill folder: puts the `inaproc` command on PATH
+  BIN="${INAPROC_BIN:-$HOME/.local/bin}"
+  mkdir -p "$BIN"
+  cat > "$BIN/inaproc" <<LAUNCH
+#!/bin/sh
+# inaproc standalone CLI (installed by install.sh). The skill folder updates itself; this file just points at it.
+exec "$PY" "$1/scripts/inaproc_app.py" "\$@"
+LAUNCH
+  chmod +x "$BIN/inaproc"
+  say "Command: $BIN/inaproc  →  type 'inaproc' (menu), 'inaproc setup' (AI), 'inaproc help'"
+  case ":$PATH:" in
+    *":$BIN:"*) ;;
+    *) echo "  $BIN is not on your PATH yet. Add it once:"
+       echo "    echo 'export PATH=\"$BIN:\$PATH\"' >> ~/.zshrc && source ~/.zshrc" ;;
+  esac
+}
+
 install_claude() {
   check_python
   copy_skill "$CLAUDE_DIR/skills/inaproc"
   say "Claude Code: installed to $CLAUDE_DIR/skills/inaproc"
   echo "  Use it with /inaproc <request> or just ask about INAPROC products."
   smoke "$CLAUDE_DIR/skills/inaproc"
+  install_launcher "$CLAUDE_DIR/skills/inaproc"
 }
 
 install_project() {
@@ -73,6 +91,7 @@ install_codex() {
   say "Codex: skill at $CODEX_DIR/skills/inaproc, prompt at $CODEX_DIR/prompts/inaproc.md"
   echo "  Use it with /prompts:inaproc <request> (or \$inaproc / just ask). Restart Codex to load it."
   smoke "$CODEX_DIR/skills/inaproc"
+  [ -x "${INAPROC_BIN:-$HOME/.local/bin}/inaproc" ] || install_launcher "$CODEX_DIR/skills/inaproc"
 }
 
 make_zip() {
@@ -86,6 +105,7 @@ make_zip() {
 
 uninstall() {
   rm -rf "$CLAUDE_DIR/skills/inaproc" "$CODEX_DIR/skills/inaproc" "$CODEX_DIR/prompts/inaproc.md"
+  rm -f "${INAPROC_BIN:-$HOME/.local/bin}/inaproc"
   say "Removed inaproc from Claude Code ($CLAUDE_DIR) and Codex ($CODEX_DIR)."
 }
 
