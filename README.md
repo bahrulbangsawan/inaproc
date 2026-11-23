@@ -2,9 +2,9 @@
 
 # 🇮🇩 inaproc
 
-### Search Indonesia's government e-catalogue from your AI assistant
+### Search Indonesia's government e-catalogue — and manage your own penyedia products — from your AI assistant
 
-Find products, the cheapest offers, seller scores and TKDN/PDN data on **[katalog.inaproc.id](https://katalog.inaproc.id)**, and export to Excel, CSV, JSON or YAML. It uses public data only, with no login and no API key.
+Find products, the cheapest offers, seller scores and TKDN/PDN data on **[katalog.inaproc.id](https://katalog.inaproc.id)**, build RAB price comparisons, and export to Excel, CSV, JSON or YAML — public data, no login, no API key. Sellers can also list, add, update and delete **their own** products on **penyedia.inaproc.id** and see which categories their KBLI allows, through their own signed-in Safari, with every change shown as a dry run first.
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![No dependencies](https://img.shields.io/badge/dependencies-none-2ea44f)](#-requirements)
@@ -14,7 +14,7 @@ Find products, the cheapest offers, seller scores and TKDN/PDN data on **[katalo
 [![Codex](https://img.shields.io/badge/Codex-skill-111111?logo=openai&logoColor=white)](#codex)
 [![ChatGPT](https://img.shields.io/badge/ChatGPT-GPT_Action-10A37F?logo=openai&logoColor=white)](#chatgpt)
 
-[**Quick start**](#-quick-start) · [**Features**](#-features) · [**Install**](#-installation) · [**Usage**](#-usage) · [**Exports**](#-output-files) · [**CLI**](#-command-line-reference) · [**FAQ**](#-faq)
+[**Quick start**](#-quick-start) · [**Features**](#-features) · [**Install**](#-installation) · [**Contoh prompt**](#-usage--contoh-prompt) · [**Penyedia**](#-your-own-penyedia-account) · [**Exports**](#-output-files) · [**CLI**](#-command-line-reference) · [**FAQ**](#-faq)
 
 </div>
 
@@ -74,9 +74,13 @@ Replace `claude` with `codex` for Codex, or `all` for Claude Code + Codex + a zi
 | 🏪 | **Seller** | Company profile, address, UMKK status, performance score breakdown (response rate, accepted and completed orders), best-selling products |
 | ⭐ | **Reviews** | Rating summary and buyer reviews with the buying agency (KLPD / Satker) |
 | 🗂 | **Reference data** | Category tree, provinces and cities with area codes, KBLI codes, PPN rates |
+| 🧾 | **RAB comparison (Perbandingan)** | Reads your RAB `.xlsx`, finds at least two comparison products per line on the catalogue, and builds the one-sheet **Perbandingan** workbook with every product link — mode *menang* (your company stays cheapest) or *termurah* |
+| 📑 | **Read Excel files** | Prints a local `.xlsx` (e.g. a RAB) without any extra packages |
 | 💾 | **Exports** | **XLSX, CSV, JSON, YAML** in an `output/` folder; the assistant asks for the format and location first |
 | 🛡 | **Polite networking** | About 1 request/second, bounded concurrency, automatic backoff on rate limits |
-| 🏬 | **Your own penyedia products** | List, eligible categories for your KBLI, add (clone as draft), update, bulk-update from CSV/XLSX and delete products in **your** penyedia.inaproc.id account through your own signed-in Safari (macOS) — every write is a dry run you approve, then `penyedia apply` |
+| 🏬 | **Your products (penyedia)** | List and inspect the products in **your** penyedia.inaproc.id account, through your own signed-in Safari (macOS) |
+| 🏷 | **Eligible categories by KBLI** | Every category your company's KBLI allows — the same check as the add-product form's *"Anda tidak memiliki KBLI yang sesuai"* — split into Level 1 › Level 2 › Level 3, exportable to CSV/XLSX/JSON/YAML |
+| ✏️ | **Add · update · bulk-update · delete** | Add a product (copy of one of yours, saved as a draft), change price/stock/name, update many products from a CSV/XLSX, delete products. Every change is a **dry run you approve**, then `penyedia apply` sends exactly that plan and logs it |
 | 🕵️ | **Zero installs** | Chrome-style request headers, and a `discover` mode that drives your own Chrome to re-capture the API if the site changes |
 
 ### How it works
@@ -103,6 +107,7 @@ The skill teaches the assistant *when* and *how* to use the catalogue, and the b
 | **Codex** CLI / IDE | **Python 3.8+** |
 | **Claude.ai / Claude Desktop** | Nothing. It runs in Claude's sandbox. Turn on code execution and allow network access to `katalog.inaproc.id`. |
 | **ChatGPT** | Nothing. It runs as a Custom GPT Action. |
+| **Penyedia commands** (your own seller account) | Claude Code or Codex on **macOS** with **Safari** (one setting, see [below](#-your-own-penyedia-account)), or Chrome/Chromium on other systems. Not available on Claude.ai or ChatGPT, because they need your own signed-in browser. |
 
 No `pip install` is needed. The script, including its XLSX and YAML writers, uses only Python's standard library.
 
@@ -126,7 +131,8 @@ No `pip install` is needed. The script, including its XLSX and YAML writers, use
 
 | Extra | Adds | Install |
 |---|---|---|
-| Chrome, Chromium, Edge or Brave | The `discover` maintenance command and the `penyedia` seller commands | Found automatically, or point `--chrome-path` / `INAPROC_CHROME` at it |
+| Safari (macOS) | The `penyedia` seller commands (default on macOS) | Already installed; turn on one setting, see [Your own penyedia account](#-your-own-penyedia-account) |
+| Chrome, Chromium, Edge or Brave | The `discover` maintenance command, and `penyedia --browser chrome` | Found automatically, or point `--chrome-path` / `INAPROC_CHROME` at it |
 
 </details>
 
@@ -211,22 +217,58 @@ If PowerShell blocks the script: `powershell -ExecutionPolicy Bypass -File .\ins
 
 ---
 
-## 💬 Usage
+## 💬 Usage — contoh prompt
 
-Just talk to your assistant. Indonesian and English both work.
+Just talk to your assistant, in Bahasa Indonesia or English. Type `/inaproc` first in Claude Code (or `/prompts:inaproc` in Codex), or simply mention INAPROC / e-katalog. Every example below is a prompt you can copy.
 
-| Ask | What happens |
+Before fetching anything, the assistant asks for the **output format** (chat saja · JSON · CSV · XLSX · YAML) and the **save location** (this project → `./output/`, or another folder). Say it upfront to skip the question: *"…simpan sebagai xlsx di folder ini"*.
+
+### 🔎 Katalog publik (no login)
+
+| Kemampuan | Contoh prompt |
 |---|---|
-| `/inaproc cari kertas HVS A4 PDN di bawah 60 ribu` | Filtered search |
-| `/inaproc cheapest laptop core i5 with TKDN` | Relevance-ranked, then price-ranked, with outliers set aside |
-| `/inaproc detail https://katalog.inaproc.id/anak-terusan/kertas-hvs` | Full product sheet |
-| `/inaproc compare <url1> <url2> <url3>` | Side-by-side table and verdict |
-| `/inaproc siapa penyedia sinzo-mitra-sejati? tampilkan produk terlarisnya` | Seller profile, score and best sellers |
-| `/inaproc reviews for <url>` | Rating summary and buyer reviews |
-| `/inaproc list the jasa categories` | Category tree with IDs |
-| `/inaproc ini file RAB ./RAB.xlsx, ini link perusahaan saya <url>, carikan pembanding minimal 2` | Asks *win* (company stays cheapest, comparisons cost more) or *cheapest*, then builds the one-sheet **Perbandingan** workbook with every product link |
+| **Cari produk** | `/inaproc cari kertas HVS A4 80 gram yang ada label PDN, harga di bawah 60 ribu` |
+| | `/inaproc cari jasa cleaning service di INAPROC, urutkan dari yang paling laris` |
+| | `/inaproc cari laptop core i5 dari penyedia UMKK, harga 8 sampai 12 juta` |
+| **Termurah** | `/inaproc carikan kertas HVS A4 80 gram termurah, 10 teratas` |
+| | `/inaproc laptop core i5 termurah yang ada TKDN-nya, simpan sebagai xlsx` |
+| **Detail produk** | `/inaproc tampilkan detail produk ini https://katalog.inaproc.id/anak-terusan/kertas-hvs` |
+| | `/inaproc berapa TKDN, varian, dan stok produk anak-terusan/kertas-hvs?` |
+| **Bandingkan** | `/inaproc bandingkan tiga produk ini: <link1> <link2> <link3>, mana yang paling murah?` |
+| **Penyedia (seller)** | `/inaproc siapa penyedia sinzo-mitra-sejati? tampilkan skor dan 10 produk terlarisnya` |
+| | `/inaproc cari penyedia dengan nama "berkah"` |
+| | `/inaproc tampilkan semua produk dari penyedia celebes-niaga-jaya` |
+| **Ulasan** | `/inaproc tampilkan rating dan ulasan pembeli untuk <link produk>` |
+| **Kategori & referensi** | `/inaproc tampilkan pohon kategori jasa sampai level 2` |
+| | `/inaproc kode wilayah untuk Kota Makassar apa?` · `/inaproc daftar kode KBLI` · `/inaproc tarif PPN di katalog berapa saja?` |
+| **Perbandingan RAB** | `/inaproc ini file RAB ./RAB.xlsx, ini link perusahaan saya <link>, carikan pembanding minimal 2` |
+| | `/inaproc buatkan perbandingan harga dari RAB.xlsx, mode termurah, simpan sebagai xlsx` |
+| **Baca file Excel** | `/inaproc baca isi file RAB.xlsx sheet RAB` |
+| **Ekspor** | `/inaproc …simpan sebagai csv dan json di ~/Documents` (works with every read above) |
 
-Before fetching anything, the assistant asks you for the **output format** (chat only · JSON · CSV · XLSX · YAML) and the **save location** (this project → `./output/`, or another folder). Answer once per request, or say it upfront: *"…save as csv in ~/Documents"*.
+For a RAB comparison the assistant also asks the mode: **menang** (your company stays the cheapest, comparisons cost more and your spec fits better) or **termurah** (find the cheapest real offers). The result is the one-sheet **Perbandingan** workbook with every product link.
+
+### 🏬 Akun penyedia Anda (Claude Code / Codex on your computer)
+
+These act on **your own** seller account through your own signed-in Safari. See [Your own penyedia account](#-your-own-penyedia-account) for the one-time setup.
+
+| Kemampuan | Contoh prompt |
+|---|---|
+| **Cek login** | `/inaproc cek apakah saya sudah login di penyedia` |
+| **Daftar produk saya** | `/inaproc tampilkan semua produk saya di penyedia` |
+| | `/inaproc produk saya yang statusnya DRAFT apa saja?` · `/inaproc ekspor daftar produk saya ke xlsx` |
+| **Detail produk saya** | `/inaproc tampilkan detail lengkap produk saya <id produk>` |
+| **Kategori yang boleh (KBLI)** | `/inaproc kategori apa saja yang sesuai dengan KBLI perusahaan saya?` |
+| | `/inaproc ekspor daftar kategori yang eligible beserta sub dan sub-sub kategorinya ke xlsx` |
+| | `/inaproc apakah saya boleh jual di kategori "Alat Uji Kincup Roda"?` · `/inaproc kategori jasa yang boleh saya pakai, simpan sebagai csv` |
+| **Tambah produk** | `/inaproc tambahkan produk baru "Kotak Saran Akrilik A4" dengan menyalin produk <id>, harga 350 ribu, stok 50` |
+| **Ubah produk** | `/inaproc ubah harga produk <id> jadi 600 ribu dan stoknya 200` |
+| | `/inaproc ganti nama produk <id> menjadi "…"` |
+| **Ubah massal** | `/inaproc update harga dan stok produk saya dari file harga-baru.xlsx` (columns `id`, `price`, `stock`, optional `variant`, `name`) |
+| **Hapus produk** | `/inaproc hapus produk saya <id>` |
+| **Kirim rencana** | after you check the dry run: `ya, kirim` / `ya, terapkan rencana itu` |
+
+Every add, change and delete first shows a **dry run** — what will change, which products, the links, and for a new product the full data — and saves a plan. Nothing is sent until you say yes; then the assistant runs `penyedia apply` on exactly that plan.
 
 ---
 
@@ -256,7 +298,50 @@ output/
 | `detail`, `compare` | products · variants · specifications · wholesale · images |
 | `seller` | seller · score_breakdown · products |
 | `reviews` | summary · reviews |
+| `penyedia products` | products |
+| `penyedia categories` | categories (`level1`, `level2`, `level3`, type, matching KBLI, id) · company_kbli; JSON/YAML also get a nested `tree` |
 | everything else | one table |
+
+---
+
+## 🏬 Your own penyedia account
+
+The `penyedia` commands manage the products in **your** account on penyedia.inaproc.id. They run inside your own signed-in browser — on macOS your normal **Safari** — so your cookies and Cloudflare check stay in the browser. The skill never sees, stores or types your password, and it doesn't solve the Cloudflare checkbox: you sign in yourself.
+
+**One-time setup (Safari, macOS)**
+
+1. Safari → **Settings → Advanced** → tick **"Show features for web developers"**.
+2. Menu bar → **Develop → Developer Settings…** → tick **"Allow JavaScript from Apple Events"**.
+3. Open <https://penyedia.inaproc.id/products> in Safari and sign in as usual. Leave the tab open.
+4. The first time, macOS asks whether your terminal app may control Safari: click **OK**.
+
+Check it with `/inaproc cek apakah saya sudah login di penyedia`. On Linux/Windows, use `--browser chrome` (the skill's own Chrome profile; `penyedia login` opens it for you).
+
+**How changes are protected**
+
+```mermaid
+flowchart LR
+    P([Prompt: ubah / tambah / hapus]) --> D[Dry run<br/>what changes + links]
+    D --> F[(Plan file<br/>~/.inaproc/penyedia/)]
+    F --> Y{You say yes?}
+    Y -- no --> X([Nothing sent])
+    Y -- yes --> A[penyedia apply]
+    A --> C{Product changed<br/>since dry run?}
+    C -- yes --> S([Skipped])
+    C -- no --> W[Send to penyedia.inaproc.id] --> L[(writes.log.jsonl)]
+```
+
+- Each plan is signed with a key that stays on your computer. A plan edited after the dry run, or applied a second time, is refused.
+- Before each update or delete, `apply` re-reads the product and skips it if it changed since the dry run.
+- Writes go one at a time, about one per second, and are never retried blindly; every write is logged (tokens redacted).
+- Only product operations exist. Orders, negotiations, payments and contracts are not supported, by design.
+
+**Good to know**
+
+- **Add = copy one of your products.** The new product keeps the category, specifications, PDN, tax and shipping of the source; you give the new name, price and stock. It is saved as a **draft** (no LKPP curation) unless you ask to submit it.
+- **Images:** the site doesn't let a new product reuse another product's image files, and it encrypts uploads in the browser. Add images in the site after creating the product.
+- **Eligible categories** use the site's own rule: a category is open to you if one of its KBLI codes matches your company's KBLI (from your OSS/NIB data). `(any)` means the category has no KBLI restriction. The first run reads about 2,900 categories in about a minute; later runs come from a 7-day cache (`--refresh` to re-read).
+- Submitting a product, or changing an active one, may send it to LKPP curation.
 
 ---
 
@@ -274,6 +359,9 @@ python3 $S compare seller-a/product-x seller-b/product-y --save xlsx --out-dir .
 python3 $S seller sinzo-mitra-sejati --products 10
 python3 $S search --seller-id 01K2KD1FCK4CX04NRKXJ29F7E9 --pages 3 --per-page 60
 python3 $S categories --type jasa --depth 2
+python3 $S penyedia products --search akrilik
+python3 $S penyedia categories --save xlsx,csv --out-dir .
+python3 $S penyedia product update <id> --price 600000      # dry run; then: penyedia apply <plan>
 python3 $S --help                      # all commands;  <command> --help for options
 ```
 
@@ -301,6 +389,21 @@ python3 $S --help                      # all commands;  <command> --help for opt
 | `raw <op> --vars JSON` · `ops` | Any bundled public GraphQL operation | |
 | `engine` | Shows the HTTP engine and limits in use | |
 | `discover [urls]` | Re-capture the site's API in your own Chrome window | `--wait S` `--headless` `--update-queries` `--chrome-path` |
+
+**Penyedia (your own account)** — add `--browser safari|chrome` to any of them (Safari is the default on macOS):
+
+| Command | Purpose | Key options |
+|---|---|---|
+| `penyedia status` · `penyedia login` · `penyedia logout` | Signed in? / wait while you sign in / clear the skill's Chrome session | `--timeout` |
+| `penyedia products` | Your products | `--search` `--status` `--page` `--per-page` |
+| `penyedia product get <id>` | One product in full | |
+| `penyedia categories` | Categories your KBLI allows, Level 1/2/3 | `--search` `--type barang\|jasa\|digital` `--all` `--refresh` |
+| `penyedia product create --from <id> --name "…"` | **Dry run**: new product copied from one of yours | `--price` `--stock` `--no-images` `--submit` |
+| `penyedia product update <id>` | **Dry run**: change fields | `--price` `--stock` `--variant` `--name` `--set path=value` |
+| `penyedia product delete <id> …` | **Dry run**: delete products | |
+| `penyedia bulk-update <file.csv\|xlsx>` | **Dry run**: many products at once | |
+| `penyedia apply <plan.json>` | Send exactly that approved plan | `--continue-on-error` |
+| `penyedia record` | Maintenance: log the site's requests while you work in the tab | `--duration` |
 
 **Options available on every command:** `--json` · `--save json,csv,xlsx,yaml` · `--out-dir DIR` · `--proxy URL` · `--min-interval S` · `--concurrency 1-4`
 
@@ -356,7 +459,7 @@ python3 $S discover --wait 60 --update-queries   # click around in the window th
 <details>
 <summary><b>Do I need an INAPROC account?</b></summary>
 <br>
-No. The skill only uses the catalogue's public, no-login data: products, prices, sellers, reviews and categories. Cart, negotiation, orders and payments need a government account and aren't supported.
+Not for the catalogue: searching, details, comparisons, sellers, reviews, categories and RAB comparisons use public, no-login data. The <code>penyedia</code> commands need <b>your own seller account</b>, signed in in your own Safari. Cart, negotiation, orders and payments aren't supported.
 </details>
 
 <details>
@@ -375,6 +478,30 @@ The catalogue's CDN slows down bursts. Wait a minute, then use <code>--min-inter
 <summary><b>I get a network error on Claude.ai / Claude Desktop / Codex.</b></summary>
 <br>
 The sandbox blocks the internet. Allow network access to <code>katalog.inaproc.id</code> in the app's settings (Claude: Settings → Capabilities; Codex: sandbox network permission).
+</details>
+
+<details>
+<summary><b>The Cloudflare checkbox won't tick when I sign in to penyedia.</b></summary>
+<br>
+Sign in in your normal Safari (the default on macOS), not in an automated browser window. The skill only reuses the session you already have there, so you tick Cloudflare yourself like any other visit.
+</details>
+
+<details>
+<summary><b>"Allow JavaScript from Apple Events" error.</b></summary>
+<br>
+Turn it on once: Safari → Settings → Advanced → "Show features for web developers", then Develop → Developer Settings… → "Allow JavaScript from Apple Events". If macOS asks whether your terminal app may control Safari, allow it (System Settings → Privacy & Security → Automation).
+</details>
+
+<details>
+<summary><b>Why is my new product a draft with no images?</b></summary>
+<br>
+Drafts avoid sending a test or unfinished product to LKPP curation; ask for <code>--submit</code> to submit it directly. Images can't be copied from another product (the site refuses to reuse image files), so add them in penyedia.inaproc.id afterwards.
+</details>
+
+<details>
+<summary><b>Why does a category say I don't have a matching KBLI?</b></summary>
+<br>
+Each category lists the KBLI codes allowed to sell in it, and the site compares them with your company's KBLI from OSS/NIB. Ask <i>"kategori apa saja yang sesuai dengan KBLI perusahaan saya?"</i> to see every category you can use; to sell in others, add the KBLI to your business licence first.
 </details>
 
 <details>
@@ -409,7 +536,7 @@ inaproc/
 
 ## ⚖️ Disclaimer
 
-This is an **unofficial** community tool. It isn't affiliated with, endorsed by or connected to **LKPP** or **INAPROC**. It reads only information the public website already shows, at a modest request rate. Prices, stock and seller data come straight from the catalogue at the time you ask; always confirm on [katalog.inaproc.id](https://katalog.inaproc.id) before making a procurement decision. Respect the site's terms of use.
+This is an **unofficial** community tool. It isn't affiliated with, endorsed by or connected to **LKPP** or **INAPROC**. The catalogue features read only information the public website already shows, at a modest request rate. The `penyedia` features act only on your own seller account, through your own signed-in browser, and only after you approve each change; you are responsible for what you publish there. Prices, stock and seller data come straight from the catalogue at the time you ask; always confirm on [katalog.inaproc.id](https://katalog.inaproc.id) before making a procurement decision. Respect the site's terms of use.
 
 ## 📄 License
 
