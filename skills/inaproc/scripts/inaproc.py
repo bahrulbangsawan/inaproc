@@ -14,7 +14,7 @@ Examples:
   python3 inaproc.py seller anak-terusan --products 10
   python3 inaproc.py read-xlsx RAB.xlsx
   python3 inaproc.py rab-report spec.json --verify --save xlsx --out-dir .
-  python3 inaproc.py discover --headed            # needs a local Chrome/Chromium/Edge/Brave
+  python3 inaproc.py discover --wait 60          # needs a local Chrome/Chromium/Edge/Brave
 """
 import argparse
 import csv
@@ -936,55 +936,72 @@ def cmd_engine(a):
 
 
 # ======================================================================= discover (browser)
+TRACKERS = ["*google-analytics.com*", "*googletagmanager.com*", "*clarity.ms*", "*facebook.net*",
+            "*doubleclick.net*"]
+
+
+def capture_graphql(tab, urls, wait_s=0):
+    """Open each URL in `tab` and return every GraphQL POST the pages send (first seen per operation)."""
+    reqs, status = {}, {}
+
+    def sent(p):
+        r = p.get("request", {})
+        if r.get("method") == "POST" and "/graphql" in r.get("url", ""):
+            reqs[p["requestId"]] = {"url": r["url"], "page": p.get("documentURL") or r["url"],
+                                    "body": r.get("postData"), "hasBody": r.get("hasPostData")}
+
+    def got(p):
+        status[p["requestId"]] = p.get("response", {}).get("status")
+
+    tab.on("Network.requestWillBeSent", sent)
+    tab.on("Network.responseReceived", got)
+    tab.block_urls(TRACKERS)
+    tab.send("Page.enable")
+    for u in urls:
+        tab.navigate(u)
+        tab.wait_load(timeout=60)
+        tab.wait_network_idle(quiet_ms=500, timeout=60)
+        if wait_s:
+            time.sleep(wait_s)
+            tab.wait_network_idle(quiet_ms=500, timeout=30)
+    found = {}
+    for rid, r in reqs.items():
+        body = r["body"]
+        if body is None and r["hasBody"]:
+            try:
+                body = tab.send("Network.getRequestPostData", {"requestId": rid}).get("postData")
+            except Exception:
+                body = None
+        try:
+            req = json.loads(body or "")
+        except ValueError:
+            continue
+        for item in req if isinstance(req, list) else [req]:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("operationName") or "(anonymous)"
+            found.setdefault(name, {"operationName": name, "status": status.get(rid), "page": r["page"],
+                                    "query": item.get("query"), "exampleVariables": item.get("variables")})
+    return sorted(found.values(), key=lambda o: o["operationName"])
+
+
 def cmd_discover(a):
-    """Open catalogue pages in Scrapling's stealth browser, record the site's own GraphQL calls in
-    the background and list (optionally save) every operation seen. Use it to refresh the queries
-    when the site changes. Needs: pip install "scrapling[fetchers]" && scrapling install."""
-    try:
-        from scrapling.fetchers import StealthySession
-    except Exception:
-        raise InaprocError('discover needs Scrapling with browsers: pip install "scrapling[fetchers]" '
-                           "&& scrapling install")
+    """Open catalogue pages in a never-logged-in Chrome profile, record the site's own GraphQL calls over the
+    DevTools Protocol and list (optionally save) every operation seen. Use it to refresh the queries when the
+    site changes. Needs a local Chrome, Chromium, Edge or Brave; no pip packages."""
     kw = urllib.parse.quote(a.keyword or "kertas")
     urls = a.urls or [SITE + "/", f"{SITE}/search?keyword={kw}", f"{SITE}/search?keyword={kw}&tabActive=SEARCH_SELLER"]
     for u in urls:
         if not re.match(r"^https://(www\.)?katalog\.inaproc\.id(/|$)", u):
             raise InaprocError(f"discover only opens katalog.inaproc.id pages, not {u}")
-    opts = dict(headless=not a.headed, record_requests=True, max_recorded_requests=2000,
-                block_ads=True, dns_over_https=True, disable_resources=True,
-                blocked_domains={"google-analytics.com", "googletagmanager.com", "clarity.ms",
-                                 "facebook.net", "doubleclick.net"})
-    if a.proxy:
-        opts["proxy"] = a.proxy
-    chrome = a.chrome_path or os.environ.get("INAPROC_CHROME")
-    if chrome:
-        opts["executable_path"] = chrome
-    found, records = {}, []
+    import inaproc_chrome as ic
     try:
-        with StealthySession(**opts) as session:
-            for u in urls:
-                session.fetch(u, network_idle=True, timeout=60000 + int(a.wait * 1000),
-                              wait=int(a.wait * 1000))
-            records = session.network.search(url_pattern=r"/graphql", method="POST", limit=None)
-    except Exception as e:
-        msg = str(e).splitlines()[0][:200]
-        if "Executable doesn't exist" in str(e) or "executable" in msg.lower():
-            raise InaprocError("no browser for Scrapling yet: run `scrapling install` once, or pass "
-                               "--chrome-path /path/to/Chrome (or set INAPROC_CHROME)")
-        raise InaprocError(f"browser capture failed: {msg}")
-    for rec in records:
-        raw = rec.meta.get("request_body") or b""
-        try:
-            req = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
-        except Exception:
-            continue
-        for r in req if isinstance(req, list) else [req]:
-            name = r.get("operationName") or "(anonymous)"
-            found.setdefault(name, {"operationName": name, "status": rec.status, "page": rec.url,
-                                    "query": r.get("query"), "exampleVariables": r.get("variables")})
-    ops = sorted(found.values(), key=lambda o: o["operationName"])
+        with ic.Browser.start("chrome-public", headed=not a.headless, chrome_path=a.chrome_path, proxy=a.proxy) as b:
+            ops = capture_graphql(b.new_tab("about:blank"), urls, wait_s=a.wait)
+    except ic.ChromeError as e:
+        raise InaprocError(str(e))
     md = (f"**{len(ops)} GraphQL operation(s) captured** from {len(urls)} page(s) "
-          "(stealth browser, ads and trackers blocked, DNS over HTTPS)\n\n"
+          "(your Chrome on a separate never-logged-in profile, trackers blocked)\n\n"
           + table(["Operation", "HTTP", "Known to this tool"],
                   [[o["operationName"], o["status"], "yes" if o["operationName"] in QUERIES else "new"] for o in ops]))
     if a.update_queries:
@@ -1635,15 +1652,18 @@ def build_parser():
     add("ops", cmd_ops, "list bundled public operations")
     add("engine", cmd_engine, "show which HTTP engine and settings will be used")
 
-    s = add("discover", cmd_discover, "capture the site's API calls in a stealth browser (Scrapling)")
+    s = add("discover", cmd_discover, "capture the site's API calls in your own Chrome (DevTools Protocol)")
     s.add_argument("urls", nargs="*", help="katalog.inaproc.id pages to open (default: home + searches)")
     s.add_argument("--keyword", help="search word for the default search pages")
-    s.add_argument("--headed", action="store_true", help="show the browser window")
+    s.add_argument("--headed", action="store_true", help=argparse.SUPPRESS)  # v1.0 flag; a window is the default now
+    s.add_argument("--headless", action="store_true",
+                   help="no window (the live site's Cloudflare refuses headless Chrome; for local testing)")
     s.add_argument("--wait", type=float, default=0,
-                   help="seconds to keep each page open (with --headed you can click around; "
+                   help="seconds to keep each page open (you can click around in the window; "
                         "first loads are server-rendered, most API calls happen on interaction)")
     s.add_argument("--update-queries", action="store_true", help="write scripts/queries.discovered.json")
-    s.add_argument("--chrome-path", help="use this Chrome/Chromium binary instead of `scrapling install` browsers")
+    s.add_argument("--chrome-path", help="Chrome/Chromium/Edge/Brave binary (default: found automatically, "
+                                         "or $INAPROC_CHROME)")
     return p
 
 

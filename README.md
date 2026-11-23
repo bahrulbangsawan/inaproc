@@ -299,7 +299,7 @@ python3 $S --help                      # all commands;  <command> --help for opt
 | `kbli` · `ppn` | KBLI codes · PPN rates | |
 | `raw <op> --vars JSON` · `ops` | Any bundled public GraphQL operation | |
 | `engine` | Shows the HTTP engine and limits in use | |
-| `discover [urls]` | Re-capture the site's API in a stealth browser | `--headed` `--wait S` `--update-queries` `--chrome-path` |
+| `discover [urls]` | Re-capture the site's API in your own Chrome window | `--wait S` `--headless` `--update-queries` `--chrome-path` |
 
 **Options available on every command:** `--json` · `--save json,csv,xlsx,yaml` · `--out-dir DIR` · `--proxy URL` · `--min-interval S` · `--concurrency 1-4`
 
@@ -325,7 +325,7 @@ Removed in v1.1: the optional Scrapling engine. `--engine scrapling`, `--imperso
 `discover` is a maintenance tool. If the site changes and a command breaks, re-capture the live GraphQL calls:
 
 ```bash
-python3 $S discover --headed --wait 60 --update-queries   # click around in the window that opens
+python3 $S discover --wait 60 --update-queries   # click around in the window that opens
 ```
 
 **Deliberately left out:** CAPTCHA/Turnstile solving and proxy rotation for getting around rate limits. The public API needs neither.
@@ -379,7 +379,7 @@ The sandbox blocks the internet. Allow network access to <code>katalog.inaproc.i
 <details>
 <summary><b>A command broke after a site update.</b></summary>
 <br>
-The catalogue's API is internal and can change. Run <code>discover --headed --wait 60 --update-queries</code>, compare <code>queries.discovered.json</code> with <code>queries.json</code>, and open an issue or PR.
+The catalogue's API is internal and can change. Run <code>discover --wait 60 --update-queries</code>, compare <code>queries.discovered.json</code> with <code>queries.json</code>, and open an issue or PR.
 </details>
 
 ---
