@@ -7,6 +7,7 @@ The skill never sees, stores or types the password; the owner signs in in the Ch
 import datetime as _dt
 import json
 import os
+import platform
 import re
 import time
 import urllib.parse
@@ -22,16 +23,18 @@ TRACKER_HOSTS = ("google-analytics.com", "googletagmanager.com", "clarity.ms", "
 LOGOUT_ORIGINS = [PENYEDIA, "https://daftar-akun.inaproc.id", "https://login-akun.inaproc.id",
                   "https://akun.inaproc.id", "https://katalog.inaproc.id"]
 
-# Runs inside a penyedia page. Returns only what the CLI prints: never the raw session (it may hold tokens).
-SESSION_JS = r"""(async()=>{
+# Runs inside a penyedia page (synchronous, so it works in Chrome and Safari alike). Returns only what the
+# CLI prints: never the raw session, which may hold tokens.
+SESSION_JS = r"""(function(){
  try{
-  const r=await fetch('/api/auth/session',{credentials:'include',headers:{accept:'application/json'}});
-  let j=null; try{ j=await r.json(); }catch(e){}
-  const u=(j&&j.user)||{};
-  const pick=(...xs)=>{for(const x of xs){if(x!==undefined&&x!==null&&x!=='')return String(x);}return null;};
-  return {signedIn: !!(j && (j.user || j.accessToken || j.expires)), endpointStatus: r.status,
-          name: pick(u.name,u.fullName,u.fullname,u.username,u.email && u.email.split('@')[0]),
-          company: pick(u.companyName,u.company && u.company.name,u.company,u.sellerName,u.institutionName),
+  var x=new XMLHttpRequest(); x.open('GET','/api/auth/session',false); x.setRequestHeader('accept','application/json');
+  x.send(null);
+  var j=null; try{ j=JSON.parse(x.responseText); }catch(e){}
+  var u=(j&&j.user)||{};
+  var pick=function(){for(var i=0;i<arguments.length;i++){var v=arguments[i];if(v!==undefined&&v!==null&&v!==''&&typeof v!=='object')return String(v);}return null;};
+  return {signedIn: !!(j && (j.user || j.accessToken || j.expires)), endpointStatus: x.status,
+          name: pick(u.name,u.fullName,u.fullname,u.username),
+          company: pick(u.companyName,u.company&&u.company.name,u.company,u.sellerName,u.institutionName),
           expires: pick(j && j.expires)};
  }catch(e){ return {signedIn:false, error:String(e)}; }
 })()"""
@@ -100,8 +103,20 @@ def _stamp():
 
 
 # ----------------------------------------------------------------------------- browser + session
-def open_penyedia(headed=True, keep_open=False, chrome_path=None, path="/products"):
-    """Start (or reuse) the login profile's Chrome and return (browser, a penyedia tab)."""
+def default_browser():
+    return os.environ.get("INAPROC_BROWSER") or ("safari" if platform.system() == "Darwin" else "chrome")
+
+
+def open_penyedia(headed=True, keep_open=False, chrome_path=None, path="/products", browser=None):
+    """Return (browser, a penyedia tab): the owner's own Safari, or the skill's Chrome profile."""
+    if (browser or default_browser()) == "safari":
+        import inaproc_safari
+        sf = inaproc_safari.Safari()
+        tab = sf.find_tab(PENYEDIA)
+        if tab is None:
+            tab = sf.new_tab(PENYEDIA + path)
+        tab.wait_load(timeout=60)
+        return sf, tab
     b = ic.Browser.start("chrome-penyedia", headed=headed, chrome_path=chrome_path, keep_open=keep_open)
     tabs = [t for t in b.tabs(PENYEDIA)]
     tab = tabs[0] if tabs else b.new_tab(PENYEDIA + path)
@@ -136,9 +151,10 @@ def _session_line(info):
 
 
 def cmd_login(a):
-    b, tab = open_penyedia(headed=True, chrome_path=a.chrome_path)
+    b, tab = open_penyedia(headed=True, chrome_path=a.chrome_path, browser=a.browser)
     try:
-        print("A Chrome window is open on penyedia.inaproc.id. Sign in there yourself "
+        where = "Safari" if a.browser == "safari" else "A Chrome window"
+        print(f"{where} is open on penyedia.inaproc.id. Sign in there yourself if needed "
               "(the skill never sees your password). Waiting…", flush=True)
         deadline = time.time() + a.timeout
         while time.time() < deadline:
@@ -158,7 +174,7 @@ def cmd_login(a):
 
 
 def cmd_status(a):
-    b, tab = open_penyedia(headed=not a.headless, chrome_path=a.chrome_path)
+    b, tab = open_penyedia(headed=not a.headless, chrome_path=a.chrome_path, browser=a.browser)
     try:
         info = session_info(tab)
     finally:
@@ -172,6 +188,10 @@ def cmd_status(a):
 
 
 def cmd_logout(a):
+    if a.browser == "safari":
+        print("You are using your own Safari: sign out there (penyedia.inaproc.id > your account > Keluar). "
+              "The skill keeps no session of its own in Safari mode.")
+        return
     b = ic.Browser.start("chrome-penyedia", headed=False, chrome_path=a.chrome_path)
     try:
         for origin in LOGOUT_ORIGINS:
@@ -281,9 +301,13 @@ class Recorder:
         return out
 
     def summary(self):
-        rows = {}
-        for rid in self.order:
-            e = self.entries[rid]
+        return summarise([self.entries[r] for r in self.order])
+
+
+def summarise(entries):
+    rows = {}
+    for e in entries:
+        if True:
             name = e["url"].split("?")[0]
             try:
                 body = json.loads(e.get("requestBody") or "")
@@ -295,7 +319,102 @@ class Recorder:
             row = rows.setdefault(key, [name, e["method"], 0, set()])
             row[2] += 1
             row[3].add(str(e.get("status")))
-        return [[n, m, c, ",".join(sorted(s))] for n, m, c, s in rows.values()]
+    return [[n, m, c, ",".join(sorted(s))] for n, m, c, s in rows.values()]
+
+
+# Installed into the owner's Safari tab by `record`: logs the page's own fetch/XHR calls in window.__inaprocRec.
+HOOK_JS = r"""(function(){
+if(window.__inaprocRec)return 'ok';
+var R=window.__inaprocRec=[];var MAX=1048576;
+function hdrs(h){var o={};try{if(!h)return o;if(typeof h.forEach==='function'&&!Array.isArray(h)){h.forEach(function(v,k){o[k]=v;});}
+ else if(Array.isArray(h)){h.forEach(function(p){o[p[0]]=p[1];});}else{for(var k in h)o[k]=h[k];}}catch(e){}return o;}
+function bodyOf(b){if(b==null)return null;if(typeof b==='string')return b.length>MAX?b.slice(0,MAX):b;
+ if(typeof FormData!=='undefined'&&b instanceof FormData){var parts=[];b.forEach(function(v,k){parts.push({name:k,
+  filename:(v&&v.name)||null,contentType:(v&&v.type)||null,bytes:(v&&v.size!=null)?v.size:String(v).length});});
+  return JSON.stringify({multipart:parts});}
+ if(typeof Blob!=='undefined'&&b instanceof Blob)return '<blob '+b.type+' '+b.size+' bytes>';
+ if(b instanceof ArrayBuffer)return '<binary '+b.byteLength+' bytes>';
+ if(typeof URLSearchParams!=='undefined'&&b instanceof URLSearchParams)return b.toString();
+ return '<'+Object.prototype.toString.call(b)+'>';}
+function wantBody(ct){return /json|graphql|text\/plain/.test(ct||'');}
+var of=window.fetch;
+window.fetch=function(input,init){init=init||{};var url=typeof input==='string'?input:((input&&input.url)||String(input));
+ var e={time:new Date().toISOString(),type:'Fetch',method:String(init.method||(input&&input.method)||'GET').toUpperCase(),
+  url:new URL(url,location.href).href,requestHeaders:hdrs(init.headers||(input&&input.headers)),requestBody:bodyOf(init.body)};
+ R.push(e);
+ return of.apply(this,arguments).then(function(r){e.status=r.status;e.responseHeaders=hdrs(r.headers);
+  var ct=r.headers.get('content-type')||'';e.mimeType=ct;
+  if(wantBody(ct)){r.clone().text().then(function(t){e.responseBody=t.length>MAX?t.slice(0,MAX):t;e.responseTruncated=t.length>MAX;e.done=true;},function(){e.done=true;});}
+  else{e.done=true;}return r;},function(err){e.error=String(err);e.done=true;throw err;});};
+var XO=XMLHttpRequest.prototype.open,XS=XMLHttpRequest.prototype.send,XH=XMLHttpRequest.prototype.setRequestHeader;
+XMLHttpRequest.prototype.open=function(m,u){this.__e={time:new Date().toISOString(),type:'XHR',method:String(m).toUpperCase(),
+ url:new URL(u,location.href).href,requestHeaders:{}};return XO.apply(this,arguments);};
+XMLHttpRequest.prototype.setRequestHeader=function(k,v){if(this.__e)this.__e.requestHeaders[k]=v;return XH.apply(this,arguments);};
+XMLHttpRequest.prototype.send=function(b){var x=this,e=x.__e;if(e){e.requestBody=bodyOf(b);R.push(e);
+ x.addEventListener('loadend',function(){e.status=x.status;var ct=x.getResponseHeader('content-type')||'';e.mimeType=ct;
+  if(wantBody(ct)&&(x.responseType===''||x.responseType==='text')){var t=x.responseText||'';e.responseBody=t.length>MAX?t.slice(0,MAX):t;}
+  e.done=true;});}
+ return XS.apply(this,arguments);};
+return 'installed';})()"""
+
+DRAIN_JS = r"""(function(){var R=window.__inaprocRec;if(!R)return null;var out=[],keep=[];
+R.forEach(function(e){if(e.done)out.push(e);else keep.push(e);});R.length=0;keep.forEach(function(e){R.push(e);});
+return out;})()"""
+
+
+def _clean_entry(e):
+    hdrs = e.get("requestHeaders") or {}
+    ctype = next((v for k, v in hdrs.items() if k.lower() == "content-type"), "")
+    body = e.get("requestBody")
+    if body is not None and not str(body).startswith(("<blob", "<binary", "{\"multipart\"")):
+        body = redact_body(body, ctype)
+    out = {"time": e.get("time"), "type": e.get("type"), "method": e.get("method"),
+           "url": redact_url(e.get("url", "")), "requestHeaders": redact_headers(hdrs), "requestBody": body,
+           "status": e.get("status"), "mimeType": e.get("mimeType"),
+           "responseHeaders": redact_headers(e.get("responseHeaders") or {})}
+    if e.get("responseBody") is not None:
+        out["responseBody"] = redact_body(e["responseBody"], e.get("mimeType") or "")
+    if e.get("responseTruncated"):
+        out["responseTruncated"] = True
+    if e.get("error"):
+        out["error"] = e["error"]
+    return out
+
+
+class SafariRecorder:
+    """`record` for Safari: a hook in the owner's penyedia tab logs the page's own fetch/XHR calls."""
+
+    def __init__(self):
+        self.entries = []
+
+    def poll(self, tab):
+        tab.evaluate(HOOK_JS)
+        got = tab.evaluate(DRAIN_JS) or []
+        self.entries += [_clean_entry(e) for e in got if not TRACKER_HOSTS or
+                         not any(t in (urllib.parse.urlsplit(e.get("url", "")).hostname or "") for t in TRACKER_HOSTS)]
+
+    def run(self, tab, duration_s=None):
+        start = time.time()
+        try:
+            while not tab.closed:
+                if duration_s and time.time() - start > duration_s:
+                    break
+                try:
+                    self.poll(tab)
+                except Exception as e:  # page mid-navigation; try again next second
+                    if "Allow JavaScript" in str(e) or "control Safari" in str(e):
+                        raise
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+        try:
+            self.poll(tab)
+        except Exception:
+            pass
+        out = ic.private_dir("recordings") / f"penyedia_{_stamp()}.json"
+        write_private_json(out, {"recordedAt": _dt.datetime.now().isoformat(timespec="seconds"),
+                                 "site": PENYEDIA, "browser": "safari", "entries": self.entries})
+        return out
 
 
 def _summarise_multipart(body, ctype):
@@ -317,6 +436,16 @@ def _summarise_multipart(body, ctype):
 
 def cmd_record(a):
     from inaproc import table
+    if a.browser == "safari":
+        b, tab = open_penyedia(browser="safari")
+        rec = SafariRecorder()
+        print("Recording the penyedia.inaproc.id tab in Safari. Work in that tab (add, edit, delete a test product); "
+              "stay in the same tab. Press Ctrl-C here, or close the tab, to finish"
+              + (f" (or wait {a.duration:g} min)." if a.duration else "."), flush=True)
+        path = rec.run(tab, duration_s=a.duration * 60 if a.duration else None)
+        print(f"\nSaved {len(rec.entries)} request(s) to {path} (tokens, cookies and signatures redacted).\n")
+        print(table(["Operation / endpoint", "Method", "Count", "HTTP"], summarise(rec.entries)))
+        return
     b, tab = open_penyedia(headed=True, chrome_path=a.chrome_path)
     rec = Recorder(b)
     print("Recording penyedia.inaproc.id API calls. Work in the Chrome window (add, edit, delete a test "
@@ -338,6 +467,8 @@ def add_parsers(sub, common):
     def add(name, fn, help_):
         s = ps.add_parser(name, help=help_, parents=[common])
         s.set_defaults(fn=fn)
+        s.add_argument("--browser", choices=["safari", "chrome"], default=default_browser(),
+                       help="safari = your own Safari (default on macOS); chrome = the skill's Chrome profile")
         s.add_argument("--chrome-path", help="Chrome/Chromium/Edge/Brave binary (default: found automatically)")
         return s
 

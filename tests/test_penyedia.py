@@ -104,3 +104,57 @@ class RecorderFilterTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BrowserChoiceTest(unittest.TestCase):
+    def test_session_js_is_synchronous(self):
+        self.assertNotIn("await", ip.SESSION_JS)
+        self.assertIn("XMLHttpRequest", ip.SESSION_JS)
+
+    def test_default_browser(self):
+        with mock.patch("platform.system", return_value="Darwin"), mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("INAPROC_BROWSER", None)
+            self.assertEqual(ip.default_browser(), "safari")
+        with mock.patch("platform.system", return_value="Linux"):
+            os.environ.pop("INAPROC_BROWSER", None)
+            self.assertEqual(ip.default_browser(), "chrome")
+        with mock.patch.dict(os.environ, {"INAPROC_BROWSER": "chrome"}):
+            self.assertEqual(ip.default_browser(), "chrome")
+
+    def test_open_penyedia_safari_reuses_existing_tab(self):
+        fake = mock.MagicMock()
+        tab = mock.MagicMock()
+        fake.find_tab.return_value = tab
+        with mock.patch("inaproc_safari.Safari", return_value=fake):
+            b, t = ip.open_penyedia(browser="safari")
+        self.assertIs(t, tab)
+        fake.new_tab.assert_not_called()
+
+    def test_open_penyedia_safari_opens_tab_when_missing(self):
+        fake = mock.MagicMock()
+        fake.find_tab.return_value = None
+        with mock.patch("inaproc_safari.Safari", return_value=fake):
+            ip.open_penyedia(browser="safari")
+        fake.new_tab.assert_called_once_with("https://penyedia.inaproc.id/products")
+
+
+class SafariRecorderTest(unittest.TestCase):
+    def test_drain_redacts_and_keeps_order(self):
+        tab = mock.MagicMock()
+        entries = [{"time": "t", "type": "Fetch", "method": "POST", "url": "https://penyedia.inaproc.id/graphql",
+                    "requestHeaders": {"content-type": "application/json", "authorization": "Bearer x"},
+                    "requestBody": json.dumps({"operationName": "createProduct", "variables": {"jwtToken": "s"}}),
+                    "status": 200, "mimeType": "application/json", "responseBody": '{"data":{"accessToken":"a"}}'},
+                   {"time": "t", "type": "XHR", "method": "PUT",
+                    "url": "https://storage.googleapis.com/b/o?X-Goog-Signature=zz", "requestHeaders": {},
+                    "requestBody": "<blob image/png 10 bytes>", "status": 200}]
+        tab.evaluate.side_effect = ["installed", entries]
+        rec = ip.SafariRecorder()
+        rec.poll(tab)
+        self.assertEqual(len(rec.entries), 2)
+        a, b = rec.entries
+        self.assertEqual(a["requestHeaders"]["authorization"], R)
+        self.assertEqual(json.loads(a["requestBody"])["variables"]["jwtToken"], R)
+        self.assertEqual(json.loads(a["responseBody"])["data"]["accessToken"], R)
+        self.assertIn("X-Goog-Signature=%3Credacted%3E", b["url"])
+        self.assertEqual(ip.summarise(rec.entries)[0][:3], ["graphql createProduct", "POST", 1])
