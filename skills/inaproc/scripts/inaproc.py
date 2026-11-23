@@ -18,27 +18,26 @@ Examples:
 """
 import argparse
 import csv
+import gzip
+import http.client
+import http.cookies
+import platform
 import datetime as _dt
-import http.cookiejar
 import json
 import os
 import re
 import sys
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 import zipfile
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from xml.sax.saxutils import escape as _xml_escape
 
 ENDPOINT = "https://katalog.inaproc.id/graphql"
 SITE = "https://katalog.inaproc.id"
-UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/131.0 Safari/537.36")
-BASE_HEADERS = {"content-type": "application/json", "accept": "application/json",
-                "referer": SITE + "/", "origin": SITE}
+CHROME_MAJOR = 142  # keep User-Agent and sec-ch-ua on the same Chrome version
 MIN_INTERVAL_FLOOR = 0.5   # never faster than 2 request starts per second, whatever the flags say
 MAX_CONCURRENCY = 4
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -80,38 +79,135 @@ class RateLimiter:
 
 
 
+def chrome_platform():
+    sysname = platform.system()
+    return {"Darwin": "macOS", "Windows": "Windows"}.get(sysname, "Linux")
+
+
+def user_agent():
+    os_part = {"macOS": "Macintosh; Intel Mac OS X 10_15_7", "Windows": "Windows NT 10.0; Win64; x64",
+               "Linux": "X11; Linux x86_64"}[chrome_platform()]
+    return (f"Mozilla/5.0 ({os_part}) AppleWebKit/537.36 (KHTML, like Gecko) "
+            f"Chrome/{CHROME_MAJOR}.0.0.0 Safari/537.36")
+
+
+def chrome_headers(body_len, cookie, host="katalog.inaproc.id"):
+    """Headers for a same-origin GraphQL fetch, in the order Chrome sends them over HTTP/1.1."""
+    sec_ch_ua = (f'"Chromium";v="{CHROME_MAJOR}", "Google Chrome";v="{CHROME_MAJOR}", '
+                 '"Not_A Brand";v="99"')
+    h = [("Host", host), ("Connection", "keep-alive"), ("Content-Length", str(body_len)),
+         ("sec-ch-ua-platform", f'"{chrome_platform()}"'), ("User-Agent", user_agent()),
+         ("sec-ch-ua", sec_ch_ua), ("Content-Type", "application/json"), ("sec-ch-ua-mobile", "?0"),
+         ("Accept", "application/json"), ("Origin", SITE), ("Sec-Fetch-Site", "same-origin"),
+         ("Sec-Fetch-Mode", "cors"), ("Sec-Fetch-Dest", "empty"), ("Referer", SITE + "/"),
+         ("Accept-Encoding", "gzip, deflate"), ("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")]
+    if cookie:
+        h.append(("Cookie", cookie))
+    return h
+
+
+class CookieStore:
+    """Cookies set by the one host this client talks to (name -> value, insertion ordered)."""
+
+    def __init__(self):
+        self._c = {}
+        self._lock = threading.Lock()
+
+    def update(self, set_cookie_headers):
+        with self._lock:
+            for raw in set_cookie_headers:
+                jar = http.cookies.SimpleCookie()
+                try:
+                    jar.load(raw)
+                except http.cookies.CookieError:
+                    continue
+                for name, morsel in jar.items():
+                    self._c[name] = morsel.value
+
+    def header(self):
+        with self._lock:
+            return "; ".join(f"{k}={v}" for k, v in self._c.items()) or None
+
+
+def _decode_body(raw, encoding):
+    encoding = (encoding or "").lower()
+    if encoding == "gzip":
+        raw = gzip.decompress(raw)
+    elif encoding == "deflate":
+        try:
+            raw = zlib.decompress(raw)
+        except zlib.error:
+            raw = zlib.decompress(raw, -zlib.MAX_WBITS)
+    return raw.decode("utf-8", "replace")
+
+
 class Client:
     """One persistent session for the whole run (cookies + keep-alive), standard library only."""
 
     engine = "stdlib"
 
-    def __init__(self, proxy=None, min_interval=1.0, concurrency=1, timeout=30):
+    def __init__(self, proxy=None, min_interval=1.0, concurrency=1, timeout=30, endpoint=ENDPOINT):
         self.limiter = RateLimiter(min_interval)
         self.concurrency = max(1, min(MAX_CONCURRENCY, concurrency))
         self.timeout = timeout
         self.proxy = proxy
         self._local = threading.local()
-        self._sessions = []
+        self._conns = []
         self._lock = threading.Lock()
-        handlers = [urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())]
-        if proxy:
-            handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
-        self._opener = urllib.request.build_opener(*handlers)
+        self.cookies = CookieStore()
+        u = urllib.parse.urlsplit(endpoint)
+        self._scheme, self._host, self._port = u.scheme, u.hostname, u.port
+        self._path = u.path or "/"
+        self._host_header = "katalog.inaproc.id" if endpoint == ENDPOINT else u.netloc
 
-    def _post_stdlib(self, body):
-        req = urllib.request.Request(ENDPOINT, data=body, headers=dict(BASE_HEADERS, **{"user-agent": UA}),
-                                     method="POST")
-        try:
-            with self._opener.open(req, timeout=self.timeout) as resp:
-                return resp.status, resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as e:
-            return e.code, e.read().decode("utf-8", "replace")
+    def _new_conn(self):
+        cls = http.client.HTTPSConnection if self._scheme == "https" else http.client.HTTPConnection
+        if self.proxy:
+            p = urllib.parse.urlsplit(self.proxy)
+            conn = cls(p.hostname, p.port or (443 if p.scheme == "https" else 80), timeout=self.timeout)
+            headers = {}
+            if p.username:
+                import base64
+                cred = f"{urllib.parse.unquote(p.username)}:{urllib.parse.unquote(p.password or '')}"
+                headers["Proxy-Authorization"] = "Basic " + base64.b64encode(cred.encode()).decode()
+            conn.set_tunnel(self._host, self._port or (443 if self._scheme == "https" else 80), headers=headers)
+        else:
+            conn = cls(self._host, self._port, timeout=self.timeout)
+        with self._lock:
+            self._conns.append(conn)
+        return conn
+
+    def _post(self, body):
+        """POST one GraphQL body with Chrome-ordered headers on this thread's keep-alive connection."""
+        for attempt in (0, 1):
+            conn = getattr(self._local, "conn", None)
+            if conn is None:
+                conn = self._local.conn = self._new_conn()
+            try:
+                conn.putrequest("POST", self._path, skip_host=True, skip_accept_encoding=True)
+                for k, v in chrome_headers(len(body), self.cookies.header(), host=self._host_header):
+                    conn.putheader(k, v)
+                conn.endheaders(body)
+                resp = conn.getresponse()
+                raw = resp.read()
+            except (http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError,
+                    http.client.CannotSendRequest, http.client.ResponseNotReady):
+                conn.close()
+                self._local.conn = None
+                if attempt:
+                    raise
+                continue
+            self.cookies.update(resp.headers.get_all("Set-Cookie") or [])
+            if (resp.getheader("Connection") or "").lower() == "close":
+                conn.close()
+                self._local.conn = None
+            return resp.status, _decode_body(raw, resp.getheader("Content-Encoding"))
 
     def gql(self, op, variables):
         if op not in QUERIES:
             raise InaprocError(f"unknown operation {op!r}; run `ops` to list them")
         body = json.dumps({"operationName": op, "query": QUERIES[op], "variables": variables}).encode()
-        post = self._post_stdlib
+        post = self._post
         for attempt in range(3):
             self.limiter.wait()
             try:
@@ -154,9 +250,11 @@ class Client:
             return list(pool.map(lambda c: self.gql(*c), calls))
 
     def close(self):
-        for cm in self._sessions:
+        with self._lock:
+            conns, self._conns = self._conns, []
+        for conn in conns:
             try:
-                cm.__exit__(None, None, None)
+                conn.close()
             except Exception:
                 pass
 
