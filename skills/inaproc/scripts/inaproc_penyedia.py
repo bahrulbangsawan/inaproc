@@ -5,6 +5,7 @@ Every call to penyedia.inaproc.id runs as fetch() inside a penyedia page of the 
 The skill never sees, stores or types the password; the owner signs in in the Chrome window.
 """
 import datetime as _dt
+import hashlib
 import json
 import os
 import platform
@@ -512,11 +513,106 @@ class SellerClient:
                 raise InaprocError(f"{op}: {d.get('code')}: {d.get('message')} (reqId {d.get('reqId')})")
         return data
 
+    def account(self):
+        """'Name · Company' of the signed-in owner; raises NotSignedIn."""
+        info = session_info(self.tab)
+        if not info.get("signedIn"):
+            raise NotSignedIn("not signed in to penyedia.inaproc.id; run `penyedia login`")
+        return " · ".join(x for x in (info.get("name"), info.get("company")) if x) or "unknown"
+
     def list_products(self, page=1, per_page=20, filter=None):
         return self.gql("getListProduct", {"page": page, "perPage": per_page, "filter": filter or {}})
 
     def get_product(self, product_id):
         return self.gql("getProductById", {"id": str(product_id)})
+
+
+# ----------------------------------------------------------------------------- plans, diff, apply, write log
+def state_hash(product):
+    return hashlib.sha256(json.dumps(product, sort_keys=True, ensure_ascii=False,
+                                     separators=(",", ":")).encode()).hexdigest()
+
+
+def diff(before, after, path=""):
+    """[(path, old, new)] for every leaf that differs."""
+    if isinstance(before, dict) and isinstance(after, dict):
+        out = []
+        for k in list(before) + [k for k in after if k not in before]:
+            out += diff(before.get(k), after.get(k), f"{path}.{k}" if path else str(k))
+        return out
+    if isinstance(before, list) and isinstance(after, list) and len(before) == len(after):
+        out = []
+        for i, (x, y) in enumerate(zip(before, after)):
+            out += diff(x, y, f"{path}[{i}]")
+        return out
+    return [] if before == after else [(path, before, after)]
+
+
+def make_plan(kind, account, writes):
+    plan = {"version": 1, "kind": kind, "account": account,
+            "createdAt": _dt.datetime.now().astimezone().isoformat(timespec="seconds"), "writes": writes}
+    path = ic.private_dir("penyedia") / f"plan_{_stamp()}_{kind}.json"
+    n = 1
+    while path.exists():
+        n += 1
+        path = ic.private_dir("penyedia") / f"plan_{_stamp()}_{kind}_{n}.json"
+    write_private_json(path, plan)
+    return path
+
+
+def _log_write(entry):
+    path = ic.private_dir("penyedia") / "writes.log.jsonl"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    os.chmod(path, 0o600)
+
+
+def apply_plan(client, path, continue_on_error=False):
+    """Send exactly the writes in a plan file. Returns {done, failed, skipped, notRun, results}."""
+    InaprocError = _err()
+    with open(path, encoding="utf-8") as f:
+        plan = json.load(f)
+    if plan.get("version") != 1 or not isinstance(plan.get("writes"), list):
+        raise InaprocError(f"{path} is not a plan file made by this tool")
+    account = client.account()  # raises NotSignedIn before anything is sent
+    if plan.get("account") != account:
+        raise InaprocError(f"this plan was made for {plan.get('account')!r}, but the signed-in account is "
+                           f"{account!r}; nothing was sent")
+    res = {"done": 0, "failed": 0, "skipped": 0, "notRun": 0, "results": []}
+    stop = False
+    for w in plan["writes"]:
+        row = {"op": w["op"], "productId": w.get("productId"), "summary": w.get("summary")}
+        res["results"].append(row)
+        if stop:
+            row["result"] = "not run (an earlier write failed)"
+            res["notRun"] += 1
+            continue
+        if w.get("beforeHash"):
+            try:
+                current = client.get_product(w["productId"])
+            except InaprocError as e:
+                current, row["error"] = None, str(e)
+            if current is None or state_hash(current) != w["beforeHash"]:
+                row["result"] = "skipped: changed since dry run (make a new plan)"
+                res["skipped"] += 1
+                continue
+        entry = {"time": _dt.datetime.now().astimezone().isoformat(timespec="seconds"), "plan": str(path),
+                 "account": account, "op": w["op"], "productId": w.get("productId"),
+                 "variables": redact(w.get("variables"))}
+        try:
+            response = client.gql(w["op"], w.get("variables") or {})
+            row["result"] = "done"
+            row["response"] = redact(response)
+            res["done"] += 1
+            entry.update(result="done", response=redact(response))
+        except InaprocError as e:
+            row["result"] = f"failed: {e}"
+            res["failed"] += 1
+            entry.update(result="failed", error=str(e))
+            stop = not continue_on_error
+        _log_write(entry)
+    return res
 
 
 def product_link(p):
