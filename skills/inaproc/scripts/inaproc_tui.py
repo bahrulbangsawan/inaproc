@@ -129,9 +129,10 @@ class Body:
         with self._lock:
             self.lines, self.offset = [], 0
 
-    def scroll(self, n):
+    def scroll(self, n, page=1):
+        """Move the view; it stops when the top of the conversation fills the page (never a blank screen)."""
         with self._lock:
-            self.offset = max(0, min(self.offset + n, max(0, len(self.lines) - 1)))
+            self.offset = max(0, min(self.offset + n, max(0, len(self.lines) - max(1, page))))
 
     def visible(self, height):
         with self._lock:
@@ -489,6 +490,8 @@ class App:
         sugg = complete(self.input.split(" ")[0]) if self.input.startswith("/") and " " not in self.input else []
         bottom_rows = 2 + (min(len(sugg), 7) if sugg else 0)
         height = max(1, h - top - bottom_rows)
+        self.page = height
+        self.body.scroll(0, page=height)  # re-clamp after a resize
         for i, (row, kind) in enumerate(screen_rows(self.body.visible(height), w, height)):
             if kind == "ai":
                 self.put(top + i, 0, row[:2], self.attr["cyan"])
@@ -734,13 +737,13 @@ class App:
                 _, _, _, _, bstate = c.getmouse()
             except c.error:
                 return
-            self.body.scroll(3 * wheel_delta(bstate))
+            self.body.scroll(3 * wheel_delta(bstate), page=getattr(self, "page", 1))
             return
         if k == c.KEY_PPAGE:
-            self.body.scroll(self.scr.getmaxyx()[0] // 2)
+            self.body.scroll(self.scr.getmaxyx()[0] // 2, page=getattr(self, "page", 1))
             return
         if k == c.KEY_NPAGE:
-            self.body.scroll(-(self.scr.getmaxyx()[0] // 2))
+            self.body.scroll(-(self.scr.getmaxyx()[0] // 2), page=getattr(self, "page", 1))
             return
         if k == c.KEY_END:
             self.body.offset = 0

@@ -73,6 +73,23 @@ class ProfilesTest(ProfilesBase):
         self.assertEqual([e["label"] for e in p.ordered(active_only=True)], ["b"])
 
 
+class StaleWriteTest(ProfilesBase):
+    def test_marking_status_never_overwrites_a_newer_change(self):
+        cfg.Profiles(self.store).add("anthropic", "k", "claude-haiku-5-5", label="utama")
+        long_lived = cfg.Profiles(self.store)            # e.g. the chat's copy, created at start
+        cfg.Profiles(self.store).set_model("utama", "claude-opus-5-5")   # /model in another place
+        long_lived.mark(long_lived.find("utama"), True)  # an answer arrives later
+        e = cfg.Profiles(self.store).find("utama")
+        self.assertEqual(e["model"], "claude-opus-5-5")
+        self.assertIn("lastOkAt", e)
+
+    def test_failover_uses_the_current_model_on_disk(self):
+        cfg.Profiles(self.store).add("anthropic", "k", "claude-haiku-5-5", label="utama")
+        p = cfg.Profiles(self.store)
+        cfg.Profiles(self.store).set_model("utama", "claude-opus-5-5")
+        self.assertEqual(p.ordered(active_only=True)[0]["model"], "claude-opus-5-5")
+
+
 class ClassifyTest(unittest.TestCase):
     def test_error_kinds(self):
         def kind(status, msg):

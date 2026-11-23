@@ -173,6 +173,10 @@ class Profiles:
         self._migrate()
 
     # storage -------------------------------------------------------------------------------------------------
+    def _reload(self):
+        """Always work on what is on disk now: another window or command may have changed it (no stale writes)."""
+        self.settings = load_settings()
+
     def _entries(self):
         return self.settings.setdefault("keys", [])
 
@@ -206,6 +210,7 @@ class Profiles:
         return None
 
     def ordered(self, active_only=False):
+        self._reload()
         out = [dict(e, source=e.get("source") or "tersimpan") for e in
                sorted(self._entries(), key=lambda x: x.get("priority", 99))]
         for name, p in PROVIDERS.items():
@@ -223,6 +228,7 @@ class Profiles:
 
     # changes ---------------------------------------------------------------------------------------------------
     def add(self, provider, key, model, label=None, priority=None):
+        self._reload()
         if provider not in PROVIDERS:
             raise ValueError(f"unknown provider {provider}")
         taken = {e["label"] for e in self._entries()}
@@ -270,6 +276,7 @@ class Profiles:
         if entry.get("env"):
             return
         import datetime as _dt
+        self._reload()
         for raw in self._entries():
             if raw["label"] == entry["label"]:
                 now = _dt.datetime.now().astimezone().isoformat(timespec="seconds")

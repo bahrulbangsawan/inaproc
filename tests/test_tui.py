@@ -99,6 +99,26 @@ class ConversationTest(unittest.TestCase):
         self.assertEqual(rows[0][1], "ai")
 
 
+class ScrollLimitTest(unittest.TestCase):
+    def test_scrolling_up_stops_with_a_full_page(self):
+        b = tui.Body()
+        for i in range(300):
+            b.add(f"baris {i}")
+        b.scroll(10_000, page=40)
+        shown = b.visible(40)
+        self.assertEqual(len(shown), 40)                 # never a blank screen
+        self.assertEqual(shown[0][0], "baris 0")
+        b.scroll(-10_000, page=40)
+        self.assertEqual(b.visible(40)[-1][0], "baris 299")
+
+    def test_short_conversations_do_not_scroll(self):
+        b = tui.Body()
+        for i in range(5):
+            b.add(f"baris {i}")
+        b.scroll(50, page=40)
+        self.assertEqual(b.offset, 0)
+
+
 class BufferTest(unittest.TestCase):
     def test_body_keeps_the_last_lines_and_scrolls(self):
         b = tui.Body(limit=100)
