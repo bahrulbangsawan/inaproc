@@ -752,10 +752,13 @@ def _apply_variant_changes(inp, product, changes):
             variants[i]["stock"] = int(_parse_amount(stock, "stock"))
 
 
-def clone_input(product, name, price=None, stock=None):
-    """CreateProductInput / CreateProductDraftInput for a new product copied from one of the owner's products."""
+def clone_input(product, name, price=None, stock=None, draft=False):
+    """CreateProductInput (draft=False) or CreateProductDraftInput (draft=True) for a new product copied from one
+    of the owner's products. The draft input has no isActive (the site's draft form leaves it out)."""
     inp = _common_input(product, keep_ids=False)
     inp["name"] = name
+    if draft:
+        inp.pop("isActive", None)
     if inp.get("shippingOption") not in ("NO_SHIPMENT", "SELLER_COURIER"):
         inp["logisticConfigurations"] = []
     _apply_variant_changes(inp, product, {"price": price, "stock": stock})
@@ -904,7 +907,7 @@ def cmd_create(a):
             if not (a.from_id and a.name):
                 raise InaprocError("give --from PRODUCT_ID and --name NEW_NAME (or a SPEC.json)")
             src = c.get_product(a.from_id)
-            inp = clone_input(src, a.name, price=a.price, stock=a.stock)
+            inp = clone_input(src, a.name, price=a.price, stock=a.stock, draft=not a.submit)
             src_line = f"cloned from {src.get('name')} ({a.from_id})"
         name = inp.get("name") or ""
         if len(name) < 5:
@@ -1003,6 +1006,9 @@ def cmd_apply(a):
     print(table(["Operation", "Product", "What", "Result"],
                 [[r["op"], r.get("productId") or (r.get("response") or {}).get("id") or "", r.get("summary"),
                   r["result"]] for r in res["results"]]))
+    for r in res["results"]:
+        if r["result"].startswith("failed"):
+            print(f"\n{r['op']} {r.get('productId') or ''}: {r['result'][len('failed: '):]}")
     print(f"\n{res['done']} done, {res['failed']} failed, {res['skipped']} skipped, {res['notRun']} not run. "
           f"Logged to {ic.private_dir('penyedia') / 'writes.log.jsonl'}")
     if res["failed"]:

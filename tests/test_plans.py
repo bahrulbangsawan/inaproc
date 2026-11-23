@@ -219,6 +219,10 @@ class ConvertTest(unittest.TestCase):
         for absent in ("tkdn", "sni", "brand", "kfa", "book", "construction", "videoToken"):
             self.assertNotIn(absent, inp)
 
+    def test_draft_input_has_no_isactive(self):
+        self.assertNotIn("isActive", ip.clone_input(SAMPLE, name="TEST HAPUS 23-11", draft=True))
+        self.assertIn("isActive", ip.clone_input(SAMPLE, name="TEST HAPUS 23-11", draft=False))
+
     def test_shipping_units_converted_to_cm_gr(self):
         p = json.loads(json.dumps(SAMPLE))
         p["shipping"].update(weight=1.5, weightUnit="KG", length=0.2, dimensionUnit="M")
@@ -296,3 +300,15 @@ class CliFlowTest(PlanTestBase):
         doc = json.loads(open(plan).read())
         self.assertEqual(doc["writes"][0]["op"], "createProductDraft")
         self.assertEqual(doc["writes"][0]["variables"]["input"]["name"], "TEST HAPUS 23-11")
+        self.assertNotIn("isActive", doc["writes"][0]["variables"]["input"])
+
+    def test_apply_prints_full_error(self):
+        from tests._util import run_main
+        from unittest import mock
+        c = FakeClient({"src1": SAMPLE}, fail_ops={"deleteProduct"})
+        with mock.patch.object(ip, "_client", return_value=(mock.MagicMock(), c)):
+            _, out, _ = run_main(["penyedia", "product", "delete", "src1"])
+            plan = [l for l in out.splitlines() if "plan_" in l][0].split("penyedia apply ")[-1].strip()
+            code, out, err = run_main(["penyedia", "apply", plan])
+        self.assertEqual(code, 1)
+        self.assertIn("deleteProduct: BAD: nope (reqId r)", out)
