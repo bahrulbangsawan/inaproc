@@ -1,0 +1,53 @@
+openapi: 3.1.0
+info:
+  title: INAPROC Katalog Elektronik (public)
+  description: >
+    Public, no-login GraphQL endpoint of Indonesia's government e-catalogue (katalog.inaproc.id).
+    Send a GraphQL query text and its variables. Only the read queries listed in the GPT instructions are supported.
+  version: 1.0.0
+servers:
+  - url: https://katalog.inaproc.id
+paths:
+  /graphql:
+    post:
+      operationId: queryInaproc
+      summary: Run one public read query against the INAPROC catalogue
+      description: >
+        Body is {"query": "<GraphQL text>", "variables": {...}}. Use the exact query texts from the instructions
+        (SEARCH, DETAIL, SELLER, SELLER_SCORE, SELLER_SEARCH, REVIEWS, CATEGORIES). Results come back under "data".
+        A result with __typename GenericError, or an "errors" array, means the input was wrong.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query, variables]
+              properties:
+                query:
+                  type: string
+                  description: GraphQL query text, copied exactly from the instructions.
+                variables:
+                  type: object
+                  description: Variables object for that query.
+                  additionalProperties: true
+      responses:
+        "200":
+          description: GraphQL response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        "400":
+          description: Invalid variables (the message names the bad or missing key)
+        "503":
+          description: Rate limited by the site's CDN; wait and retry less often

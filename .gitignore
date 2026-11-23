@@ -1,0 +1,12 @@
+# build output
+dist/
+# Python
+__pycache__/
+*.pyc
+.venv/
+# exports made while testing the skill
+output/
+# local API captures from `discover`
+skills/inaproc/scripts/queries.discovered.json
+*.har
+.DS_Store
