@@ -374,8 +374,11 @@ class Browser:
         return Tab(self, target_id, sid)
 
     def new_tab(self, url="about:blank"):
-        tid = self.conn.send("Target.createTarget", {"url": url})["targetId"]
-        return self._attach(tid)
+        tid = self.conn.send("Target.createTarget", {"url": "about:blank"})["targetId"]
+        tab = self._attach(tid)
+        if not url.startswith("about:"):
+            tab.navigate(url)  # navigate after attaching so wait_load() knows which page to wait for
+        return tab
 
     def targets(self):
         return [t for t in self.conn.send("Target.getTargets")["targetInfos"] if t.get("type") == "page"]
@@ -432,6 +435,7 @@ class Tab:
         self._inflight = set()
         self._last_activity = time.time()
         self._net = False
+        self._expect = None
         conn = browser.conn
         conn.on("Target.targetDestroyed", self._on_destroyed)
         conn.on("Target.detachedFromTarget", self._on_detached)
@@ -464,6 +468,7 @@ class Tab:
         return r.get("result", {}).get("value")
 
     def navigate(self, url):
+        self._expect = None if url.startswith("about:") else url
         self.send("Page.navigate", {"url": url})
 
     def url(self):
@@ -476,7 +481,11 @@ class Tab:
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                if self.evaluate("document.readyState", await_promise=False, timeout=5) == "complete":
+                st = self.evaluate("[location.href, document.readyState]", await_promise=False, timeout=5)
+                if self._expect and st[0].startswith("about:"):
+                    st = None  # the navigation has not committed yet
+                if st and st[1] == "complete":
+                    self._expect = None
                     return True
             except ChromeError:
                 pass

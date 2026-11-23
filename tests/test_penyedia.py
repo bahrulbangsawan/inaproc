@@ -64,6 +64,26 @@ class StatusTest(unittest.TestCase):
         self.assertIn("PT Contoh", out)
 
 
+class SessionInfoTest(unittest.TestCase):
+    def _tab(self, js_result, url="https://penyedia.inaproc.id/products"):
+        t = mock.MagicMock()
+        t.url.return_value = url
+        t.evaluate.return_value = js_result
+        return t
+
+    def test_script_error_is_not_signed_in(self):
+        info = ip.session_info(self._tab({"signedIn": False, "error": "TypeError: Failed to fetch"}))
+        self.assertFalse(info["signedIn"])
+
+    def test_empty_session_is_not_signed_in(self):
+        self.assertFalse(ip.session_info(self._tab({"signedIn": False, "endpointStatus": 200}))["signedIn"])
+
+    def test_fallback_only_when_endpoint_missing(self):
+        self.assertTrue(ip.session_info(self._tab({"signedIn": False, "endpointStatus": 404}))["signedIn"])
+        self.assertFalse(ip.session_info(self._tab({"signedIn": False, "endpointStatus": 404},
+                                                   url="https://penyedia.inaproc.id/auth/signin"))["signedIn"])
+
+
 class RecorderFilterTest(unittest.TestCase):
     def test_keeps_api_and_uploads_drops_assets_and_trackers(self):
         keep = ip.Recorder.wanted

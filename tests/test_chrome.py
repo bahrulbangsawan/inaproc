@@ -187,6 +187,9 @@ def _chrome():
 
 class _Echo(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/slow":
+            import time
+            time.sleep(1.5)
         body = b"<html><body>ok</body></html>"
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
@@ -226,6 +229,19 @@ class ChromeLiveTest(unittest.TestCase):
         with ic.Browser.start("chrome-test", headed=False) as b:
             tab = b.new_tab("about:blank")
             self.assertEqual(tab.evaluate("1+1"), 2)
+
+    def test_wait_load_waits_for_the_real_page(self):
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Echo)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        base = "http://127.0.0.1:%d" % srv.server_address[1]
+        try:
+            with ic.Browser.start("chrome-test", headed=False) as b:
+                tab = b.new_tab(base + "/slow")
+                self.assertTrue(tab.wait_load())
+                self.assertEqual(tab.evaluate("location.href"), base + "/slow")
+        finally:
+            srv.shutdown()
+            srv.server_close()
 
     def test_reuse_running_instance(self):
         b1 = ic.Browser.start("chrome-test", headed=False, keep_open=True)

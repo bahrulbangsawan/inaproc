@@ -117,7 +117,7 @@ def session_info(tab):
         tab.wait_load(timeout=60)
         url = tab.url()
     info = tab.evaluate(SESSION_JS) or {"signedIn": False}
-    if not info.get("signedIn") and info.get("endpointStatus") in (None, 404):
+    if not info.get("signedIn") and info.get("endpointStatus") == 404:
         # No session endpoint answered: fall back to where the site sent the tab.
         info["signedIn"] = url.startswith(PENYEDIA) and "/auth" not in url and "login" not in url
     return info
