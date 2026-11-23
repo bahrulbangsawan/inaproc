@@ -9,4 +9,4 @@ Read ~/.codex/skills/inaproc/SKILL.md first and follow it. In particular, ask me
 
 For a RAB comparison with my company's link, also ask whether my company should win (comparisons more expensive) or whether to find the cheapest, and follow references/rab-comparison.md.
 
-For my own penyedia products (list, add, update, bulk-update, delete), use the `penyedia` commands in SKILL.md: every write is a dry run first; show me the plan and wait for my explicit yes before `penyedia apply`.
+For my own penyedia products (list, add, update, bulk-update, delete) and my orders / negotiations (read-only), use the `penyedia` commands in SKILL.md: every write is a dry run first; show me the plan and wait for my explicit yes before `penyedia apply`.

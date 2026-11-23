@@ -70,7 +70,7 @@ class AnthropicLoopTest(unittest.TestCase):
         http = FakeHTTP([(401, {"error": {"message": "invalid x-api-key"}})])
         with self.assertRaises(ai.AIError) as cm:
             ai.Agent("anthropic", "k", "claude-opus-5-5", runner=FakeRunner(), http=http, system="S").send("x")
-        self.assertIn("inaproc setup", str(cm.exception))
+        self.assertIn("inaproc keys", str(cm.exception))
 
 
 class OpenAILoopTest(unittest.TestCase):
@@ -108,6 +108,11 @@ class SystemPromptTest(unittest.TestCase):
         sp = ai.system_prompt()
         self.assertIn("Do not ask about the output format", sp)
         self.assertIn("one-off question", sp)
+
+    def test_products_always_as_a_table_with_three_category_levels(self):
+        sp = ai.system_prompt()
+        self.assertIn("Kategori L3", sp)
+        self.assertIn("penyedia orders", sp)
 
 
 class ModelsTest(unittest.TestCase):

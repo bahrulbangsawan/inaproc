@@ -30,7 +30,7 @@ import inaproc_ui as ui  # noqa: E402
 
 PENYEDIA_URL = "https://penyedia.inaproc.id/products"
 AUTOMATION_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
-APP_COMMANDS = {"setup", "ai", "chat", "ask", "whoami", "login", "doctor", "help", "menu", "logout-ai"}
+APP_COMMANDS = {"setup", "ai", "chat", "ask", "whoami", "login", "doctor", "help", "menu", "keys", "model", "tui"}
 
 
 # ----------------------------------------------------------------------------------------------- helpers
@@ -47,11 +47,14 @@ def _key_for(provider):
     return _store().get(provider)
 
 
+def _profiles():
+    return cfg.Profiles(_store())
+
+
 def _ai_settings():
-    s = cfg.load_settings()
-    if s.get("provider") in cfg.PROVIDERS and s.get("model"):
-        return s
-    return None
+    """The key used first (highest priority, active), or None."""
+    act = _profiles().ordered(active_only=True)
+    return act[0] if act else None
 
 
 def _skill_commands():
@@ -255,40 +258,49 @@ def _pick_model(provider, models):
     return ids[i]
 
 
-def cmd_setup(args):
+KIND_TEXT = {"auth": "key ditolak", "quota": "saldo/kuota habis", "rate": "batas per menit", "model": "model tidak ada",
+             "server": "server provider bermasalah", "network": "jaringan", "context": "percakapan terlalu panjang"}
+
+
+def _flag(args, name):
+    if name in args:
+        i = args.index(name)
+        if i + 1 >= len(args):
+            raise ValueError(f"{name} perlu nilai")
+        return args[i + 1]
+    return None
+
+
+def cmd_keys_add(args):
     import inaproc_ai as ai
     st = ui.Style()
-    current = _ai_settings() or {}
+    try:
+        provider, model, label = _flag(args, "--provider"), _flag(args, "--model"), _flag(args, "--label")
+        priority = _flag(args, "--priority")
+    except ValueError as e:
+        print(f"{e}, mis.  inaproc keys add --provider anthropic --model claude-opus-5-5", file=sys.stderr)
+        return 2
     names = list(cfg.PROVIDERS)
-    for flag in ("--provider", "--model"):
-        if flag in args and args.index(flag) + 1 >= len(args):
-            print(f"{flag} perlu nilai, mis.  inaproc setup {flag} {'anthropic' if flag == '--provider' else 'NAMA'}",
-                  file=sys.stderr)
-            return 2
-    if "--provider" in args:
-        provider = args[args.index("--provider") + 1]
-        if provider not in cfg.PROVIDERS:
-            print(f"Provider tidak dikenal: {provider}. Pilihan: {', '.join(names)}", file=sys.stderr)
-            return 2
-    else:
-        ui.panel("Pengaturan AI", ["Mode AI memakai API key Anda sendiri. Biaya pemakaian ditagih oleh provider.",
-                                   "Key disimpan di " + ("Keychain macOS" if _store().keychain else
-                                                         "~/.inaproc/keys.json (hanya bisa dibaca akun Anda)") +
-                                   ", tidak pernah ditampilkan atau dikirim ke tempat lain."])
-        labels = []
-        for n in names:
-            key, _src = _key_for(n)
-            labels.append(cfg.PROVIDERS[n]["label"] + (st.green("  ✓ key tersimpan") if key else ""))
-        default = names.index(current["provider"]) if current.get("provider") in names else 0
-        provider = names[ui.choose("Provider AI mana yang dipakai?", labels, default=default)]
+    if provider and provider not in cfg.PROVIDERS:
+        print(f"Provider tidak dikenal: {provider}. Pilihan: {', '.join(names)}", file=sys.stderr)
+        return 2
+    profiles = _profiles()
+    if not provider:
+        ui.panel("Tambah API key", [
+            "Mode AI memakai API key Anda sendiri; biaya ditagih oleh provider.",
+            "Anda bisa menyimpan beberapa key (sama atau beda provider). Jika satu key ditolak, saldonya habis atau",
+            "provider bermasalah, inaproc otomatis pindah ke key berikutnya sesuai urutan prioritas.",
+            "Key disimpan di " + ("Keychain macOS" if _store().keychain else "~/.inaproc/keys.json (hanya akun Anda)") +
+            " dan tidak pernah ditampilkan utuh."])
+        counts = {n: sum(1 for e in profiles.ordered() if e["provider"] == n and not e.get("env")) for n in names}
+        labels = [cfg.PROVIDERS[n]["label"] + (st.green(f"  ✓ {counts[n]} key") if counts[n] else "") for n in names]
+        provider = names[ui.choose("Provider AI mana?", labels, default=0)]
     p = cfg.PROVIDERS[provider]
-    existing, src = _key_for(provider)
     if "--key-stdin" in args:
         key = sys.stdin.readline().strip()
     else:
         print(st.gray(f"  Dapatkan key di {p['key_hint']}"))
-        prompt = f"API key {p['label']}" + (f" (Enter = pakai yang tersimpan {ui.mask(existing)})" if existing else "")
-        key = ui.ask(prompt, secret=True) or existing or ""
+        key = ui.ask(f"API key {p['label']}", secret=True)
     if not key:
         print(st.yellow("Tidak ada key. Batal."))
         return 1
@@ -300,21 +312,164 @@ def cmd_setup(args):
         except ai.AIError as e:
             steps.fail(str(e))
             return 1
-    if "--model" in args:
-        model = args[args.index("--model") + 1]
-    else:
+    if not model:
         model = _pick_model(provider, models)
-    where = _store().set(provider, key) if key != existing or (src or "").startswith("env") else src
-    cfg.save_settings({"provider": provider, "model": model})
+    if not label and "--key-stdin" not in args:
+        label = ui.ask("Nama key (mis. kantor, pribadi, cadangan)",
+                       default=f"{provider}-{sum(1 for e in profiles.ordered() if e['provider'] == provider) + 1}")
+    entry = profiles.add(provider, key, model, label=label or None,
+                         priority=int(priority) if priority and priority.isdigit() else None)
+    pos = next(i for i, e in enumerate(profiles.ordered(), 1) if e["label"] == entry["label"])
+    ui.panel("Key tersimpan", [f"Nama      : {entry['label']}", f"Provider  : {p['label']}", f"Model     : {model}",
+                               f"API key   : {ui.mask(key)}  ({entry['where']})", f"Prioritas : #{pos}", "",
+                               "Lihat/urutkan semua key:  inaproc keys", "Ganti model:  inaproc model"], kind="ok")
     env = p["env"]
-    if os.environ.get(env) and os.environ.get(env) != key:
-        ui.panel("Perhatian: variabel lingkungan menimpa key ini", [
-            f"{env} diset di shell Anda dan selalu dipakai lebih dulu daripada key yang baru disimpan.",
-            f"Hapus atau ganti {env} di ~/.zshrc (atau shell profile lain), lalu buka terminal baru."], kind="warn")
-    ui.panel("Siap dipakai", [f"Provider : {p['label']}", f"Model    : {model}",
-                              f"API key  : {ui.mask(key)}  ({where})", "",
-                              "Coba:  inaproc ai", "       inaproc \"carikan kertas HVS A4 termurah dan bandingkan\""],
-             kind="ok")
+    if os.environ.get(env):
+        print(st.gray(f"  Catatan: {env} juga diset di shell; key itu dipakai paling akhir sebagai cadangan."))
+    return 0
+
+
+def _keys_table(profiles):
+    st = ui.Style()
+    rows = []
+    for i, e in enumerate(profiles.ordered(), 1):
+        key = profiles.secret(e)
+        if not e.get("enabled", True):
+            status = st.gray("nonaktif")
+        elif e.get("lastError"):
+            status = st.red("✗ " + KIND_TEXT.get(e["lastError"], e["lastError"])) + st.gray(
+                "  " + (e.get("lastErrorAt") or "")[5:16].replace("T", " "))
+        elif e.get("lastOkAt"):
+            status = st.green("✓ ok") + st.gray("  " + e["lastOkAt"][5:16].replace("T", " "))
+        else:
+            status = st.gray("belum dipakai")
+        rows.append([f"#{i}", e["label"], cfg.PROVIDERS[e["provider"]]["label"], e.get("model") or "-",
+                     ui.mask(key) if key else st.yellow("hilang"), status, e.get("source")])
+    return ui.table(["Prioritas", "Nama", "Provider", "Model", "Key", "Status", "Sumber"], rows)
+
+
+KEYS_HELP = """inaproc keys                      daftar key + urutan prioritas + status
+inaproc keys add                  tambah key (wizard); atau: --provider P --model M --label L --key-stdin [--priority N]
+inaproc keys move <nama|#> <N>     pindahkan ke prioritas N
+inaproc keys model <nama|#> [M]    ganti model key itu (tanpa M: pilih dari daftar)
+inaproc keys test                 uji semua key sekarang
+inaproc keys on|off <nama|#>      aktifkan / nonaktifkan
+inaproc keys remove <nama|#>      hapus key (juga dari Keychain)"""
+
+
+def cmd_keys(args):
+    import inaproc_ai as ai
+    sub, rest = (args[0], args[1:]) if args else ("list", [])
+    profiles = _profiles()
+    try:
+        if sub in ("list", "ls"):
+            if not profiles.ordered():
+                ui.panel("Belum ada API key", ["Tambahkan:  inaproc keys add"], kind="warn")
+                return 0
+            print(_keys_table(profiles))
+            print(ui.Style().gray("  Dipakai berurutan dari #1; jika gagal (key ditolak, saldo habis, limit, server)"
+                                  " otomatis pindah ke berikutnya."))
+            return 0
+        if sub in ("add", "tambah"):
+            return cmd_keys_add(rest)
+        if sub in ("remove", "rm", "hapus"):
+            profiles.remove(rest[0])
+            print(ui.Style().green("✓ ") + f"Key {rest[0]} dihapus.")
+            return 0
+        if sub in ("move", "pindah", "priority", "prioritas"):
+            profiles.move(rest[0], int(rest[1]))
+            print(_keys_table(_profiles()))
+            return 0
+        if sub in ("on", "off"):
+            profiles.set_enabled(rest[0], sub == "on")
+            print(_keys_table(_profiles()))
+            return 0
+        if sub == "model":
+            return cmd_model(rest)
+        if sub in ("test", "uji"):
+            with ui.Steps() as steps:
+                for e in profiles.ordered():
+                    steps.start(f"{e['label']} · {cfg.PROVIDERS[e['provider']]['label']}")
+                    try:
+                        ai.verify_key(e["provider"], profiles.secret(e) or "")
+                        profiles.mark(e, True)
+                        steps.done("ok")
+                    except ai.AIError as err:
+                        profiles.mark(e, False, err.kind)
+                        steps.fail(KIND_TEXT.get(err.kind, err.kind))
+            print(_keys_table(_profiles()))
+            return 0
+        if sub in ("-h", "--help", "help"):
+            print(KEYS_HELP)
+            return 0
+    except (KeyError, IndexError, ValueError) as e:
+        print(ui.Style(sys.stderr).red("✗ ") + (str(e).strip("'\"") or "perintah tidak lengkap") +
+              "\n" + KEYS_HELP, file=sys.stderr)
+        return 2
+    print(KEYS_HELP)
+    return 2
+
+
+def cmd_model(args):
+    """inaproc model [nama|#] [MODEL] — change the model of a key (default: the top-priority key)."""
+    import inaproc_ai as ai
+    profiles = _profiles()
+    if not profiles.ordered():
+        ui.panel("Belum ada API key", ["Tambahkan dulu:  inaproc keys add"], kind="warn")
+        return 1
+    entry = profiles.find(args[0]) if args else None
+    if args and not entry:
+        print(f"Tidak ada key {args[0]!r}. Lihat:  inaproc keys", file=sys.stderr)
+        return 2
+    if not entry:
+        saved = [e for e in profiles.ordered() if not e.get("env")]
+        entry = saved[0] if len(saved) == 1 else saved[ui.choose(
+            "Ganti model untuk key mana?", [f"{e['label']} · {cfg.PROVIDERS[e['provider']]['label']} · {e['model']}"
+                                             for e in saved], default=0)]
+    if len(args) >= 2:
+        model = args[1]
+    else:
+        with ui.Steps() as steps:
+            steps.start(f"Mengambil daftar model {cfg.PROVIDERS[entry['provider']]['label']}")
+            models = ai.verify_key(entry["provider"], profiles.secret(entry) or "")
+            steps.done(f"{len(models)} model")
+        ids = model_choices(entry["provider"], models)
+        if entry.get("model") in ids:
+            ids.remove(entry["model"])
+            ids.insert(0, entry["model"])
+        labels = [m + ("  (sekarang)" if m == entry.get("model") else "") for m in ids] + ["Ketik nama model lain…"]
+        i = ui.choose("Pilih model", labels, default=0)
+        model = ui.ask("Nama model") if i == len(ids) else ids[i]
+    profiles.set_model(entry["label"], model)
+    print(ui.Style().green("✓ ") + f"Key {entry['label']} sekarang memakai {model}.")
+    return 0
+
+
+def cmd_setup(args):
+    """First run: add a key. Later: a small menu over keys and models."""
+    if any(a.startswith("--") for a in args) or not [e for e in _profiles().ordered() if not e.get("env")]:
+        return cmd_keys_add(args)
+    print(_keys_table(_profiles()))
+    i = ui.choose("Pengaturan AI", ["Tambah API key", "Ganti model", "Ubah urutan prioritas", "Uji semua key",
+                                    "Nonaktifkan / aktifkan key", "Hapus key", "Selesai"], default=6)
+    if i == 0:
+        return cmd_keys_add([])
+    if i == 1:
+        return cmd_model([])
+    if i == 2:
+        ref = ui.ask("Key mana (nama atau #)")
+        pos = ui.ask("Jadi prioritas nomor", default="1")
+        return cmd_keys(["move", ref, pos])
+    if i == 3:
+        return cmd_keys(["test"])
+    if i == 4:
+        ref = ui.ask("Key mana (nama atau #)")
+        e = _profiles().find(ref)
+        return cmd_keys(["off" if e and e.get("enabled", True) else "on", ref])
+    if i == 5:
+        ref = ui.ask("Key mana yang dihapus (nama atau #)")
+        if ui.confirm(f"Hapus key {ref}?", default=False):
+            return cmd_keys(["remove", ref])
     return 0
 
 
@@ -358,14 +513,12 @@ def _confirm_plan_factory(get_steps):
     return confirm
 
 
-def _make_agent(holder):
+def _make_agent(holder, confirm=None):
     import inaproc_ai as ai
-    s = _ai_settings()
-    if not s:
-        return None, "AI belum diatur. Jalankan:  inaproc setup"
-    key, _src = _key_for(s["provider"])
-    if not key:
-        return None, f"Tidak ada API key untuk {cfg.PROVIDERS[s['provider']]['label']}. Jalankan:  inaproc setup"
+    profiles = _profiles()
+    if not profiles.ordered(active_only=True):
+        return None, "AI belum diatur. Tambahkan API key:  inaproc keys add"
+
     def think(turn):
         st = holder.get("steps")
         if st:
@@ -381,9 +534,19 @@ def _make_agent(holder):
         if st:
             (st.done if ok else st.fail)(detail)
 
-    runner = ai.ToolRunner(confirm=_confirm_plan_factory(lambda: holder.get("steps")),
+    def switch(frm, to, err):
+        st = holder.get("steps")
+        why = KIND_TEXT.get(err.kind, err.kind)
+        if st:
+            if st.label is None:
+                st.start(f"Key {frm['label']}")
+            st.fail(f"{frm['label']}: {why}")
+            st.start(f"Beralih ke key {to['label']} ({cfg.PROVIDERS[to['provider']]['label']} · {to['model']})")
+            st.done()
+
+    runner = ai.ToolRunner(confirm=confirm or _confirm_plan_factory(lambda: holder.get("steps")),
                            on_start=tool_start, on_end=tool_end)
-    agent = ai.Agent(s["provider"], key, s["model"], runner=runner, on_think=think)
+    agent = ai.FailoverAgent(profiles, runner=runner, on_think=think, on_switch=switch)
     return agent, None
 
 
@@ -403,7 +566,8 @@ def _answer(agent, holder, question):
     print()
     print(pretty(answer))
     u = agent.last_usage
-    print(ui.Style().gray(f"\n  {agent.model} · jawaban ini: {u['input']:,} token masuk · "
+    who = f"{agent.current['label']} · " if getattr(agent, "current", None) else ""
+    print(ui.Style().gray(f"\n  {who}{agent.model} · jawaban ini: {u['input']:,} token masuk · "
                           f"{u['output']:,} token keluar").replace(",", "."))
     return 0
 
@@ -439,8 +603,10 @@ def cmd_ai(args):
         return 1
     st = ui.Style()
     s = _ai_settings()
+    others = len(_profiles().ordered(active_only=True)) - 1
     ui.panel("Asisten AI inaproc", [
-        f"{cfg.PROVIDERS[s['provider']]['label']} · {s['model']}",
+        f"{s['label']} · {cfg.PROVIDERS[s['provider']]['label']} · {s['model']}" +
+        (f"  (+{others} key cadangan)" if others > 0 else ""),
         "Tanyakan apa saja: cari & bandingkan produk, termurah, cek penyedia, RAB pembanding,",
         "produk Anda, kategori sesuai KBLI, ubah harga/stok (selalu minta persetujuan Anda dulu).",
         "Perintah:  /baru  percakapan baru   /model  ganti model   /keluar  selesai"])
@@ -464,15 +630,32 @@ def cmd_ai(args):
             agent.reset()
             print(st.gray("  Percakapan baru dimulai."))
             continue
+        if q in ("/keys", "/key"):
+            cmd_keys([])
+            continue
         if q in ("/model", "/setup"):
-            cmd_setup([])
+            cmd_model([]) if q == "/model" else cmd_setup([])
             agent, problem = _make_agent(holder)
             if not agent:
                 print(st.yellow(problem))
                 return 1
             continue
-        if q in ("/bantuan", "/help"):
-            print(st.gray("  /baru · /model · /keluar — selebihnya ketik pertanyaan biasa."))
+        if q.startswith("/"):
+            import inaproc_tui as tui
+            kind, payload = tui.parse(q)
+            if kind == "help":
+                cmd_help([])
+            elif kind == "error":
+                print(st.yellow("  " + payload[0]))
+            elif kind == "run":
+                run_skill(payload)
+            elif kind in ("app", "interactive"):
+                main(payload)
+                agent, problem = _make_agent(holder)
+            elif kind == "clear":
+                print("\033[2J\033[H", end="")
+            elif kind == "quit":
+                break
             continue
         try:
             _answer(agent, holder, q)
@@ -510,13 +693,17 @@ def cmd_whoami(args):
             rows.append(["Sesi berlaku s.d.", info["expires"]])
     else:
         rows.append(["Penyedia", st.yellow("belum login") + st.gray("  → inaproc login")])
-    s = _ai_settings()
-    if s:
-        key, src = _key_for(s["provider"])
-        rows.append(["AI", f"{cfg.PROVIDERS[s['provider']]['label']} · {s['model']}"])
-        rows.append(["API key", (ui.mask(key) + st.gray(f"  ({src})")) if key else st.yellow("tidak ada → inaproc setup")])
+    profiles = _profiles()
+    act = profiles.ordered(active_only=True)
+    if act:
+        s = act[0]
+        key = profiles.secret(s)
+        rows.append(["AI", f"{s['label']} · {cfg.PROVIDERS[s['provider']]['label']} · {s['model']}"])
+        rows.append(["API key", (ui.mask(key) + st.gray(f"  ({s.get('source')})")) if key else st.yellow("hilang")])
+        if len(act) > 1:
+            rows.append(["Cadangan", " → ".join(f"{e['label']} ({e['provider']})" for e in act[1:])])
     else:
-        rows.append(["AI", st.yellow("belum diatur") + st.gray("  → inaproc setup")])
+        rows.append(["AI", st.yellow("belum diatur") + st.gray("  → inaproc keys add")])
     rows.append(["Versi", "inaproc " + _version()])
     print(ui.kv_table(rows))
     if info.get("error"):
@@ -589,11 +776,13 @@ def cmd_doctor(args):
             import inaproc_ai as ai
             if not s:
                 return False, "belum diatur", None
-            key, src = _key_for(s["provider"])
+            key = _profiles().secret(s)
             if not key:
                 return False, "API key tidak ada", None
-            ai.list_models(s["provider"], key)
-            return True, f"{cfg.PROVIDERS[s['provider']]['label']} · {s['model']} · key {ui.mask(key)}", None
+            ai.verify_key(s["provider"], key)
+            n = len(_profiles().ordered(active_only=True))
+            return True, (f"{s['label']} · {cfg.PROVIDERS[s['provider']]['label']} · {s['model']} · key {ui.mask(key)}"
+                          + (f" · {n - 1} cadangan" if n > 1 else "")), None
         ok, fix = _check(steps, "AI (API key)", ai_key)
         if not ok:
             problems.append(("Mode AI belum siap", ["Jalankan:  inaproc setup", "Pilih provider, tempel API key, "
@@ -611,8 +800,11 @@ def cmd_doctor(args):
 
 # ----------------------------------------------------------------------------------------------- home + guided menu
 COMMAND_HELP = [
-    ("inaproc", "menu interaktif (paling mudah)"),
-    ("inaproc setup", "atur AI: provider, API key, model"),
+    ("inaproc", "TUI: header tetap, menu /, hasil bergulir (di terminal)"),
+    ("inaproc menu", "menu bernomor klasik"),
+    ("inaproc setup", "atur AI: tambah key, ganti model, prioritas"),
+    ("inaproc keys", "semua API key + urutan prioritas (auto-pindah jika gagal)"),
+    ("inaproc model", "ganti model AI"),
     ("inaproc ai", "ngobrol dengan asisten AI (cari, bandingkan, analisis, RAB, produk Anda)"),
     ("inaproc \"pertanyaan…\"", "satu pertanyaan langsung ke AI"),
     ("inaproc whoami", "akun penyedia + AI yang aktif"),
@@ -624,6 +816,8 @@ COMMAND_HELP = [
     ("inaproc seller <slug>  ·  sellers \"nama\"", "profil & skor penyedia"),
     ("inaproc penyedia products", "produk Anda"),
     ("inaproc penyedia categories", "kategori yang cocok dengan KBLI Anda"),
+    ("inaproc penyedia orders  ·  order <no>", "pesanan Anda (hanya baca)"),
+    ("inaproc penyedia negotiations  ·  negotiation <no>", "negosiasi + riwayat tawaran (hanya baca)"),
     ("inaproc penyedia product update|create|delete …", "ubah produk (dry run → apply)"),
     ("inaproc help", "daftar ini;  inaproc <perintah> --help untuk opsinya"),
 ]
@@ -631,6 +825,10 @@ COMMAND_HELP = [
 
 def cmd_help(args):
     print(ui.table(["Perintah", "Fungsi"], COMMAND_HELP))
+    import inaproc_tui as tui
+    print()
+    print(ui.table(["Menu / (TUI & chat)", "Sama dengan perintah biasa (script / AI agent)"],
+                   [[c.usage, c.equivalent] for c in tui.COMMANDS if c.equivalent != "—"]))
     return 0
 
 
@@ -708,6 +906,8 @@ MENU = [
     ("Cek penyedia (seller)", _flow_seller),
     ("Produk saya di penyedia", _flow_my_products),
     ("Kategori sesuai KBLI saya", _flow_categories),
+    ("Pesanan saya", lambda: run_skill(["penyedia", "orders"])),
+    ("Negosiasi saya", lambda: run_skill(["penyedia", "negotiations"])),
     ("Tambah / ubah / hapus produk (lewat AI, dengan persetujuan)",
      lambda: _flow_ai_with("Contoh: \"ubah harga produk <id> jadi 600 ribu\"")),
     ("Perbandingan RAB (lewat AI)", lambda: _flow_ai_with("Contoh: \"ini RAB saya ./RAB.xlsx, link perusahaan saya …, "
@@ -723,8 +923,8 @@ def cmd_home(args):
     ui.banner(_version())
     st = ui.Style()
     s = _ai_settings()
-    ai_line = (st.green("● ") + f"AI: {cfg.PROVIDERS[s['provider']]['label']} · {s['model']}") if s else \
-        (st.yellow("● ") + "AI belum diatur" + st.gray("  → inaproc setup"))
+    ai_line = (st.green("● ") + f"AI: {s['label']} · {cfg.PROVIDERS[s['provider']]['label']} · {s['model']}") if s \
+        else (st.yellow("● ") + "AI belum diatur" + st.gray("  → inaproc keys add"))
     print("  " + ai_line)
     if not _interactive():
         print()
@@ -746,6 +946,9 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
         if not argv:
+            if _interactive() and os.environ.get("INAPROC_TUI", "1") != "0":
+                import inaproc_tui
+                return inaproc_tui.run(_version())
             return cmd_home(argv)
         head, rest = argv[0], argv[1:]
         if head in ("-h", "--help", "help"):
@@ -755,8 +958,19 @@ def main(argv=None):
             return 0
         if head == "menu":
             return cmd_home(rest)
+        if head == "tui":
+            import inaproc_tui
+            if not _interactive():
+                print("TUI butuh terminal interaktif. Untuk script / AI agent pakai perintah biasa (inaproc help).",
+                      file=sys.stderr)
+                return 2
+            return inaproc_tui.run(_version())
         if head == "setup":
             return cmd_setup(rest)
+        if head in ("keys", "key"):
+            return cmd_keys(rest)
+        if head == "model":
+            return cmd_model(rest)
         if head in ("ai", "chat"):
             return cmd_ai(rest)
         if head == "ask":
@@ -777,7 +991,7 @@ def main(argv=None):
                   + " ".join(rest))
             return 2
         # Anything else is a question in plain language.
-        if _ai_settings() and _key_for(_ai_settings()["provider"])[0]:
+        if _ai_settings():
             return run_ask(" ".join(argv))
         print(ui.Style().yellow(f"“{head}” bukan perintah inaproc.") + " Untuk bertanya dengan bahasa biasa, atur AI "
               "dulu:  inaproc setup   ·   daftar perintah:  inaproc help")
@@ -791,7 +1005,7 @@ def main(argv=None):
         print(ui.Style(sys.stderr).red("✗ ") + str(e), file=sys.stderr)
         return e.exit_code
     finally:
-        if argv and argv[0] in ("setup", "ai", "chat", "ask", "whoami", "login", "doctor"):
+        if argv and argv[0] in ("setup", "ai", "chat", "ask", "whoami", "login", "doctor", "keys", "model"):
             try:
                 import inaproc_update
                 note = inaproc_update.maybe_update(_version())

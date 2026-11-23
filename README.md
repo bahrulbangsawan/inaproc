@@ -87,8 +87,10 @@ What the recording shows, in order:
 8. `inaproc "bandingkan 3 kertas HVS A4 80 gram termurah yang PDN, mana yang paling layak untuk instansi?"` — the AI runs `cheapest` and `compare` itself (each step shown live), then answers with its analysis, a table and the links
 
 ```bash
-inaproc                 # menu interaktif (logo, pilih nomor, tanpa hafal perintah)
-inaproc setup           # pilih provider AI, tempel API key (tersembunyi), pilih model
+inaproc                 # TUI: header tetap (logo, status AI, menu /), hasil bergulir, ketik / untuk menu
+inaproc setup           # tambah API key / ganti model / atur prioritas
+inaproc keys            # semua API key + urutan prioritas + status
+inaproc model           # ganti model AI
 inaproc ai              # ngobrol dengan asisten AI
 inaproc "bandingkan 3 kertas HVS A4 80 gram termurah yang PDN, mana yang paling layak?"
 inaproc doctor          # cek koneksi, Safari, login penyedia, API key — dengan langkah perbaikan
@@ -96,13 +98,29 @@ inaproc doctor          # cek koneksi, Safari, login penyedia, API key — denga
 
 | Perintah | Fungsi |
 |---|---|
-| `inaproc` | Home screen with the ASCII logo, AI status and a numbered menu: search, cheapest, detail/compare, seller check, your products, KBLI categories, add/update/delete (via AI), RAB (via AI), account, login, setup, doctor |
-| `inaproc setup` | Wizard: choose the provider, paste the key (hidden input), the key is tested live, the model list comes from the provider. Keys go to the **macOS Keychain** (else `~/.inaproc/keys.json`, owner-only); `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` override |
+| `inaproc` | **TUI** in a terminal: sticky header (logo, active AI key/model, the `/` menu list), scrolling results, live step line, input with `/` suggestions (Tab completes, ↑/↓ history, PgUp/PgDn scroll). Plain text goes to the AI. `inaproc menu` = the classic numbered menu; `INAPROC_TUI=0` turns the TUI off |
+| `inaproc setup` · `inaproc keys` · `inaproc model` | **Several API keys** — more than one per provider and several providers — in a **priority list**. When a key is rejected, out of credit, rate-limited, its model is missing or the provider is down, the next key takes over automatically (shown live: *“habis: saldo/kuota habis → beralih ke key cadangan (OpenRouter)”*). `inaproc keys` shows every key (masked), its model, priority and last status; `keys add / move / model / test / on / off / remove`; `inaproc model` changes a model. Keys live in the **macOS Keychain** (else `~/.inaproc/keys.json`, owner-only); keys in `ANTHROPIC_API_KEY` etc. are used last as a fallback |
 | `inaproc ai` · `inaproc ask "…"` · `inaproc "…"` | AI chat (REPL with `/baru`, `/model`, `/keluar`) or one question. The AI calls the inaproc commands as tools and shows each step live |
 | `inaproc whoami` | Penyedia account (via Safari), AI provider/model, masked key, version |
 | `inaproc login` | Opens penyedia.inaproc.id in Safari and waits while you sign in yourself |
 | `inaproc doctor` | Checks Python, the catalogue connection, Safari permission, penyedia login and the API key; shows step-by-step fixes and offers to open the right Safari / System Settings page |
-| `inaproc <command> …` | Every skill command (`search`, `cheapest`, `detail`, `compare`, `seller`, `penyedia …`, `rab-report` …), drawn as tables — or as cards with full links when a table is too wide. Piped output stays plain markdown; `--json` stays raw |
+| `inaproc <command> …` | Every skill command (`search`, `cheapest`, `detail`, `compare`, `seller`, `penyedia …`, `rab-report` …), always as **structured tables** with product details and **Kategori L1 / L2 / L3**: a normal table when it fits, turned sideways for a few wide rows, one labelled detail table per item otherwise (links never cut). Piped output stays plain markdown; `--json` stays raw |
+
+**`/` menus in the TUI and chat — and the same thing as a plain command (for scripts and AI agents such as Claude Code, which can't drive a full-screen TUI):**
+
+| Menu | Plain command |
+|---|---|
+| `/cari <kata>` | `inaproc search "kata"` |
+| `/termurah <kata>` | `inaproc cheapest "kata" --top 10` |
+| `/detail <link>` · `/bandingkan <link> <link>` | `inaproc detail <link>` · `inaproc compare <link> <link>` |
+| `/penjual <slug\|nama>` | `inaproc seller <slug>` · `inaproc sellers "nama"` |
+| `/produk [kata]` | `inaproc penyedia products [--search kata]` |
+| `/kategori [kata]` | `inaproc penyedia categories [--search kata]` |
+| `/pesanan [no]` | `inaproc penyedia orders` · `inaproc penyedia order <no>` |
+| `/nego [no]` | `inaproc penyedia negotiations` · `inaproc penyedia negotiation <no>` |
+| `/whoami` · `/keys` · `/model` · `/login` · `/doctor` | `inaproc whoami` · `inaproc keys` · `inaproc model` · `inaproc login` · `inaproc doctor` |
+| `/run <perintah>` | `inaproc <perintah>` |
+| `/baru` · `/bersih` · `/bantuan` · `/keluar` | new AI chat · clear · help · quit |
 
 **Contoh prompt untuk mode AI**
 
@@ -113,6 +131,8 @@ inaproc doctor          # cek koneksi, Safari, login penyedia, API key — denga
 | Cek penyedia | `inaproc "seberapa bagus skor penyedia sinzo-mitra-sejati dan apa produk terlarisnya?"` |
 | RAB pembanding | `inaproc "ini RAB saya ./RAB.xlsx, link perusahaan saya <link>, carikan pembanding minimal 2, simpan xlsx"` |
 | Produk saya | `inaproc "produk saya mana yang stoknya di bawah 50?"` |
+| Pesanan | `inaproc "tampilkan pesanan saya yang masih diproses"` |
+| Negosiasi | `inaproc "negosiasi mana yang harganya turun paling banyak, dan siapa yang menawar?"` |
 | Kategori KBLI | `inaproc "ekspor kategori yang cocok dengan KBLI saya ke xlsx di folder ini"` |
 | Ubah produk | `inaproc "naikkan harga produk <id> jadi 600 ribu"` → dry run, lalu **terminal bertanya "Kirim perubahan ini sekarang? [y/N]"** |
 
@@ -141,6 +161,7 @@ inaproc doctor          # cek koneksi, Safari, login penyedia, API key — denga
 | 💾 | **Exports** | **XLSX, CSV, JSON, YAML** in an `output/` folder; the assistant asks for the format and location first |
 | 🛡 | **Polite networking** | About 1 request/second, bounded concurrency, automatic backoff on rate limits |
 | 🏬 | **Your products (penyedia)** | List and inspect the products in **your** penyedia.inaproc.id account, through your own signed-in Safari (macOS) |
+| 📦 | **Orders & negotiations (read-only)** | Your orders (status, agency, PPK, items, totals, shipping) and negotiations (original vs last price, offer history, cancel reason) |
 | 🏷 | **Eligible categories by KBLI** | Every category your company's KBLI allows — the same check as the add-product form's *"Anda tidak memiliki KBLI yang sesuai"* — split into Level 1 › Level 2 › Level 3, exportable to CSV/XLSX/JSON/YAML |
 | ✏️ | **Add · update · bulk-update · delete** | Add a product (copy of one of yours, saved as a draft), change price/stock/name, update many products from a CSV/XLSX, delete products. Every change is a **dry run you approve**, then `penyedia apply` sends exactly that plan and logs it |
 | 🖥 | **Standalone CLI + AI** | `inaproc` command with a guided menu, live progress, and an AI assistant on your own Anthropic / OpenAI / OpenRouter / DeepSeek key that searches, compares and analyses for you |
@@ -332,6 +353,8 @@ These act on **your own** seller account through your own signed-in Safari. See 
 | **Daftar produk saya** | `/inaproc tampilkan semua produk saya di penyedia` |
 | | `/inaproc produk saya yang statusnya DRAFT apa saja?` · `/inaproc ekspor daftar produk saya ke xlsx` |
 | **Detail produk saya** | `/inaproc tampilkan detail lengkap produk saya <id produk>` |
+| **Pesanan saya** | `/inaproc tampilkan semua pesanan saya` · `/inaproc detail pesanan EP-…` (nomor dari daftar pesanan) |
+| **Negosiasi** | `/inaproc negosiasi saya apa saja statusnya?` · `/inaproc riwayat tawaran untuk pesanan EP-…` |
 | **Kategori yang boleh (KBLI)** | `/inaproc kategori apa saja yang sesuai dengan KBLI perusahaan saya?` |
 | | `/inaproc ekspor daftar kategori yang eligible beserta sub dan sub-sub kategorinya ke xlsx` |
 | | `/inaproc apakah saya boleh jual di kategori "Alat Uji Kincup Roda"?` · `/inaproc kategori jasa yang boleh saya pakai, simpan sebagai csv` |
@@ -408,7 +431,7 @@ flowchart LR
 - Each plan is signed with a key that stays on your computer. A plan edited after the dry run, or applied a second time, is refused.
 - Before each update or delete, `apply` re-reads the product and skips it if it changed since the dry run.
 - Writes go one at a time, about one per second, and are never retried blindly; every write is logged (tokens redacted).
-- Only product operations exist. Orders, negotiations, payments and contracts are not supported, by design.
+- Only product **writes** exist. Orders and negotiations can be read, never changed; payments and contracts are out of scope.
 
 **Good to know**
 
@@ -473,6 +496,8 @@ python3 $S --help                      # all commands;  <command> --help for opt
 | `penyedia products` | Your products | `--search` `--status` `--page` `--per-page` |
 | `penyedia product get <id>` | One product in full | |
 | `penyedia categories` | Categories your KBLI allows, Level 1/2/3 | `--search` `--type barang\|jasa\|digital` `--all` `--refresh` |
+| `penyedia orders` · `penyedia order <no>` | Your orders · one order in full (read-only) | `--status` `--page` `--per-page` `--all` |
+| `penyedia negotiations` · `penyedia negotiation <no>` | Negotiations · one with its offer history (read-only) | `--status` `--page` `--per-page` `--all` |
 | `penyedia product create --from <id> --name "…"` | **Dry run**: new product copied from one of yours | `--price` `--stock` `--no-images` `--submit` |
 | `penyedia product update <id>` | **Dry run**: change fields | `--price` `--stock` `--variant` `--name` `--set path=value` |
 | `penyedia product delete <id> …` | **Dry run**: delete products | |
@@ -600,7 +625,8 @@ inaproc/
 │   ├── scripts/inaproc_update.py   ← daily self-update from GitHub
 │   ├── scripts/inaproc_app.py      ← the standalone `inaproc` CLI (menu, setup, AI, doctor)
 │   ├── scripts/inaproc_ai.py       ← AI mode: Anthropic + OpenAI-compatible adapters, tools
-│   ├── scripts/inaproc_ui.py       ← logo, tables/cards, live steps, prompts
+│   ├── scripts/inaproc_ui.py       ← logo, structured tables, live steps, prompts
+│   ├── scripts/inaproc_tui.py      ← full-screen TUI (curses): sticky header, / menus
 │   ├── scripts/inaproc_config.py   ← providers, API keys (Keychain / private file)
 │   ├── version.json           ← the published version (auto-update reads it)
 │   ├── scripts/queries.json   ← the 22 public GraphQL operations

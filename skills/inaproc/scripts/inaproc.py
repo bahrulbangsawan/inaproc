@@ -41,7 +41,7 @@ sys.modules.setdefault("inaproc", sys.modules[__name__])
 
 ENDPOINT = "https://katalog.inaproc.id/graphql"
 SITE = "https://katalog.inaproc.id"
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 CHROME_MAJOR = 158  # keep User-Agent and sec-ch-ua on the same Chrome version
 MIN_INTERVAL_FLOOR = 0.5   # never faster than 2 request starts per second, whatever the flags say
 MAX_CONCURRENCY = 4
@@ -592,11 +592,85 @@ def _search_result(data):
             "perPage": data.get("perPage"), "items": [slim_item(i) for i in (data.get("items") or [])]}
 
 
+# ----------------------------------------------------------------------- category path (Level 1 › 2 › 3)
+CATEGORY_ENRICH_LIMIT = 12
+
+
+def _cache_path():
+    home = os.environ.get("INAPROC_HOME") or os.path.join(os.path.expanduser("~"), ".inaproc")
+    os.makedirs(os.path.join(home, "cache"), exist_ok=True)
+    return os.path.join(home, "cache", "category_paths.json")
+
+
+_CAT_CACHE = None
+
+
+def _cat_cache():
+    global _CAT_CACHE
+    path = _cache_path()
+    if _CAT_CACHE is None or _CAT_CACHE[0] != path:
+        try:
+            with open(path, encoding="utf-8") as f:
+                _CAT_CACHE = (path, json.load(f))
+        except (OSError, ValueError):
+            _CAT_CACHE = (path, {})
+    return _CAT_CACHE[1]
+
+
+def _cat_save():
+    try:
+        with open(_cache_path(), "w", encoding="utf-8") as f:
+            json.dump(_cat_cache(), f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def category_chain(cat_id):
+    """[Level 1, Level 2, Level 3] names for a category id (cached on disk)."""
+    if not cat_id:
+        return []
+    cache = _cat_cache()
+    if cat_id not in cache:
+        d = gql("getProductCategory", {"id": cat_id}).get("getProductCategory") or {}
+        chain, cur = [], d
+        while cur:
+            chain.append(cur.get("name"))
+            cur = cur.get("parent")
+        cache[cat_id] = list(reversed(chain))
+        _cat_save()
+    return cache[cat_id]
+
+
+def add_category_levels(item, chain):
+    chain = (chain or []) + [None, None, None]
+    item["categoryL1"] = chain[0] or item.get("category")
+    item["categoryL2"], item["categoryL3"] = chain[1], " › ".join(x for x in chain[2:] if x) or None
+    return item
+
+
+def enrich_categories(items, limit=CATEGORY_ENRICH_LIMIT):
+    """Search results only carry Level 1; look up each product's own category for Levels 2-3 (first `limit`)."""
+    cache = _cat_cache()
+    todo = [i for i in items[:limit] if f"p:{i['url']}" not in cache]
+    if todo:
+        details = CLIENT.gql_many([("getProductBySlug", {"username": i["sellerUsername"],
+                                                         "slug": i["url"].rstrip("/").rsplit("/", 1)[-1],
+                                                         "regionCode": None}) for i in todo])
+        for i, d in zip(todo, details):
+            cache[f"p:{i['url']}"] = ((d or {}).get("getProductBySlug") or {}).get("category", {}).get("id")
+        _cat_save()
+    for n, i in enumerate(items):
+        add_category_levels(i, category_chain(cache.get(f"p:{i['url']}")) if n < limit else [i.get("category")])
+    return items
+
+
 def items_table(items, start=1):
     rows = [[n, i["name"], price_range(i["priceMinWithTax"], i["priceMaxWithTax"]), i["seller"], i["location"],
-             f'{i["tkdnBmp"]}%' if i["tkdnBmp"] else "-", ",".join(i["labels"]) or "-", i["unitSold"] or 0, i["url"]]
+             f'{i["tkdnBmp"]}%' if i["tkdnBmp"] else "-", ",".join(i["labels"]) or "-", i["unitSold"] or 0,
+             i.get("categoryL1") or i.get("category"), i.get("categoryL2"), i.get("categoryL3"), i["url"]]
             for n, i in enumerate(items, start)]
-    return table(["#", "Product", "Price (incl. PPN)", "Seller", "Location", "TKDN+BMP", "Labels", "Sold", "URL"], rows)
+    return table(["#", "Product", "Price (incl. PPN)", "Seller", "Location", "TKDN+BMP", "Labels", "Sold",
+                  "Kategori L1", "Kategori L2", "Kategori L3", "URL"], rows)
 
 
 def search_kwargs(a):
@@ -613,11 +687,16 @@ def cmd_search(a):
     res = [_search_result(r) for r in CLIENT.gql_many(
         [("searchProducts", {"input": search_input(a.keyword, p, a.per_page, a.sort, **kw)}) for p in pages])]
     items = [i for r in res for i in r["items"]]
+    if not a.no_categories:
+        enrich_categories(items)
     first = res[0]
     label = a.keyword or (f"seller-{a.seller_id}" if a.seller_id else "all")
     md = (f"**{first['total']:,} results** for “{a.keyword or '(any)'}” (page {pages[0]}"
           f"{'–' + str(pages[-1]) if len(pages) > 1 else ''} of {first['lastPage']}, sort: {a.sort}). "
           f"Prices include PPN.\n\n" + items_table(items, (a.page - 1) * a.per_page + 1))
+    if not a.no_categories and len(items) > CATEGORY_ENRICH_LIMIT:
+        md += (f"\n\n_Kategori L2/L3 diisi untuk {CATEGORY_ENRICH_LIMIT} baris pertama (L1 untuk sisanya); "
+               f"pakai --per-page {CATEGORY_ENRICH_LIMIT} untuk detail kategori semua baris._")
     if first["total"] and first["total"] >= 10000:
         md += "\n\n_The site caps totals at 10,000: narrow with --type, --category, --min-price or --max-price._"
     full = {"total": first["total"], "lastPage": first["lastPage"], "pages": pages, "sort": a.sort, "items": items}
@@ -650,6 +729,8 @@ def cmd_cheapest(a):
         outliers = [i for i in pool if i["priceMinWithTax"] < floor]
         pool = [i for i in pool if i["priceMinWithTax"] >= floor]
     top = pool[: a.top]
+    if not a.no_categories:
+        enrich_categories(top)
     md = (f"**Cheapest {len(top)} of {len(pool)} relevant results** for “{a.keyword}” (searched {a.pages} page(s) "
           f"of 60 by relevance{', name must contain every keyword' if a.strict else ''}). Prices include PPN; check "
           "the unit and variant on the detail page before deciding.\n\n" + items_table(top))
@@ -692,6 +773,7 @@ def slim_detail(p):
     return {
         "name": p.get("name"), "url": product_url(p.get("username"), p.get("slug")), "id": p.get("id"),
         "status": p.get("status"), "type": p.get("type"), "category": (p.get("category") or {}).get("name"),
+        "categoryId": (p.get("category") or {}).get("id"),
         "brand": brand.get("brandName") if isinstance(brand, dict) else None,
         "priceMinWithTax": prices.get("minPriceWithTax"), "priceMaxWithTax": prices.get("maxPriceWithTax"),
         "minPurchase": prices.get("minPurchase"), "wholesale": prices.get("productWholesalePrices") or [],
@@ -727,14 +809,19 @@ def _detail_sheets(ds):
     }
 
 
+def _with_levels(d):
+    return add_category_levels(d, category_chain(d.get("categoryId")))
+
+
 def cmd_detail(a):
-    d = slim_detail(fetch_details([a.product], a.region)[0])
+    d = _with_levels(slim_detail(fetch_details([a.product], a.region)[0]))
     tk = d["tkdn"] or {}
     rating = d["rating"] or {}
     lines = [f"## {d['name']}", d["url"], "", table(["Field", "Value"], [
         ["Price (incl. PPN)", price_range(d["priceMinWithTax"], d["priceMaxWithTax"])],
         ["Unit / min. purchase", f"{d['unit'] or '-'} / {d['minPurchase'] or '-'}"],
-        ["Category", d["category"]], ["Brand", d["brand"]], ["Status", d["status"]],
+        ["Kategori L1", d.get("categoryL1")], ["Kategori L2", d.get("categoryL2")],
+        ["Kategori L3", d.get("categoryL3")], ["Brand", d["brand"]], ["Status", d["status"]],
         ["Labels", ", ".join(d["labels"]) or "-"],
         ["TKDN / BMP", f"{tk.get('value')}% / {tk.get('bmp')}" if tk.get("value") is not None else "-"],
         ["TKDN certificate", f"{tk.get('certificate') or '-'} (expires {tk.get('expires') or '-'})"],
@@ -760,7 +847,7 @@ def cmd_detail(a):
 def cmd_compare(a):
     if len(a.products) < 2:
         raise InaprocError("compare needs at least two products")
-    ds = [slim_detail(p) for p in fetch_details(a.products, a.region)]
+    ds = [_with_levels(slim_detail(p)) for p in fetch_details(a.products, a.region)]
     cheapest = min((d["priceMinWithTax"] for d in ds if d["priceMinWithTax"] is not None), default=None)
 
     def row(label, fn):
@@ -773,7 +860,8 @@ def cmd_compare(a):
         row("Unit", lambda d: d["unit"]), row("Min. purchase", lambda d: d["minPurchase"]),
         row("Variants", lambda d: len(d["variants"])),
         row("Stock (sum)", lambda d: sum((v["stock"] or 0) for v in d["variants"]) if d["variants"] else "-"),
-        row("Brand", lambda d: d["brand"]), row("Category", lambda d: d["category"]),
+        row("Brand", lambda d: d["brand"]), row("Kategori L1", lambda d: d.get("categoryL1")),
+        row("Kategori L2", lambda d: d.get("categoryL2")), row("Kategori L3", lambda d: d.get("categoryL3")),
         row("TKDN %", lambda d: (d["tkdn"] or {}).get("value")), row("BMP", lambda d: (d["tkdn"] or {}).get("bmp")),
         row("Labels", lambda d: ", ".join(d["labels"])), row("PPN %", lambda d: d["ppnPercent"]),
         row("Seller", lambda d: d["sellerUsername"]), row("Seller city", lambda d: d["sellerCity"]),
@@ -1595,6 +1683,7 @@ def build_parser():
     s.add_argument("--per-page", type=int, default=20)
     s.add_argument("--sort", choices=sorted(SORTS), default="relevance")
     filters(s)
+    s.add_argument("--no-categories", action="store_true", help="skip the Level 2/3 category lookups (faster)")
 
     s = add("cheapest", cmd_cheapest, "cheapest matching products (relevance first, then by price)")
     s.add_argument("keyword")
@@ -1603,6 +1692,7 @@ def build_parser():
     s.add_argument("--strict", action="store_true", help="product name must contain every keyword")
     s.add_argument("--include-outliers", action="store_true", help="keep suspiciously cheap listings")
     s.add_argument("--outlier-ratio", type=float, default=0.2, help="set aside prices below this share of the median")
+    s.add_argument("--no-categories", action="store_true", help="skip the Level 2/3 category lookups (faster)")
     filters(s)
 
     s = add("detail", cmd_detail, "full detail of one product")

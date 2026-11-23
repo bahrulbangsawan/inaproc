@@ -99,6 +99,8 @@ Products are referenced by URL (`https://katalog.inaproc.id/<seller>/<slug>`) or
 4. Reply with the outcome, a short table and **every product link** (company and comparisons).
 Never invent or adjust a price, size or spec to make the company win; if a line lacks two real more-expensive comparables, say so.
 
+**Product output**: always present products as a structured table with their details, including the category as three columns **Kategori L1 / L2 / L3** (`search`, `cheapest`, `detail` and `compare` print them; search fills L2/L3 for the first 12 rows, so use `--per-page 12` or `detail` when you need them for more).
+
 **"Detail" / "spesifikasi"**: run `detail`. It covers price range, unit, minimum purchase, variants with stock, wholesale tiers, TKDN certificate and expiry, PDN, PPN, weight, specs and description.
 
 **"Seller" / "penyedia"**: run `seller` with the store slug or any of its product URLs. Add `--products N` for its best sellers. All of a seller's products are available with `search --seller-id <Seller ID> --pages N`. A null final score means the seller hasn't been scored yet; that isn't a bad score.
@@ -120,6 +122,8 @@ Safari. Then the user signs in to https://penyedia.inaproc.id in Safari as usual
 | `penyedia login` | Opens the page and waits while the user signs in |
 | `penyedia products [--search W] [--status S] [--page N] [--per-page N]` | The user's products (id, name, variants, price, stock, status, link); `--save` works |
 | `penyedia categories [--search W] [--type barang\|jasa\|digital] [--all] [--refresh]` | Categories the company's KBLI allows, split into **Level 1 › Level 2 › Level 3** with the matching KBLI and category id (the same check as the add-product form's "Anda tidak memiliki KBLI yang sesuai"; `(any)` = the category has no KBLI restriction). Exports with `--save csv,xlsx,json,yaml --out-dir DIR` (ask the format and location first, as in Step 1): CSV/XLSX get one row per category with `level1, level2, level3` columns plus a company-KBLI sheet; JSON/YAML also get a nested `tree`. The category list is cached 7 days; the first run reads ~2,900 categories in about a minute |
+| `penyedia orders [--status S] [--all]` · `penyedia order <No. pesanan>` | **Read-only.** The company's orders (number, date, status, agency, first product, qty, total, via negotiation, courier) and one order in full (items with original/last price, PPN, PPK and work unit, shipping) |
+| `penyedia negotiations [--status S] [--all]` · `penyedia negotiation <No. pesanan>` | **Read-only.** Negotiations (original vs last price and total, version, deadline) and one negotiation with its offer history (who proposed which price, when) and cancel/reject reason |
 | `penyedia product get ID` | One product in full |
 | `penyedia product create --from ID --name "NEW NAME" [--price P] [--stock N] [--no-images] [--submit]` | **Dry run.** New product copied from one of theirs. Default saves a **draft** (no LKPP curation); `--submit` creates and submits it. Use `--no-images`: the site does not let a new product reuse another product's image files, so images are added in the site afterwards |
 | `penyedia product update ID [--price P] [--stock N] [--variant ID_OR_SKU] [--name N] [--set path=value]` | **Dry run** with a before/after table |
@@ -133,7 +137,7 @@ Safari. Then the user signs in to https://penyedia.inaproc.id in Safari as usual
 2. Show the user the dry run (what changes, which products, links) and get an explicit yes **for that plan**. Never run `apply` on a plan the user has not seen; a new dry run means a new yes.
 3. `apply` re-reads each product first and skips it if it changed since the dry run; it stops at the first failure. Report what it printed, including any error text.
 4. Every sent write is appended to `~/.inaproc/penyedia/writes.log.jsonl` (tokens redacted).
-5. Only product operations exist; orders, negotiations and payments are refused by design.
+5. Only product writes exist. Orders and negotiations can be **read** (`penyedia orders/order/negotiations/negotiation`), never changed; payments are out of scope.
 
 ## Reading the data correctly
 

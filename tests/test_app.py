@@ -33,10 +33,15 @@ class AppTestBase(unittest.TestCase):
         self.env.start()
         for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"):
             os.environ.pop(k, None)
-        self.ks = mock.patch.object(cfg, "KeyStore", lambda *a, **k: cfg.KeyStore.__wrapped__(use_keychain=False)
-                                    if hasattr(cfg.KeyStore, "__wrapped__") else None)
+        self.store = cfg.KeyStore(use_keychain=False)  # never the real Keychain in tests
+        self.store_patch = mock.patch.object(app, "_store", return_value=self.store)
+        self.store_patch.start()
+
+    def add_key(self, provider="anthropic", model="claude-opus-5-5", key="sk-test-key-1234", label=None):
+        return cfg.Profiles(self.store).add(provider, key, model, label=label)
 
     def tearDown(self):
+        self.store_patch.stop()
         self.env.stop()
         self.tmp.cleanup()
 
@@ -80,9 +85,8 @@ class PassthroughTest(AppTestBase):
         self.assertEqual(out.strip(), '{"a": 1}')
 
     def test_free_text_goes_to_the_ai_when_configured(self):
-        cfg.save_settings({"provider": "deepseek", "model": "deepseek-chat"})
-        with mock.patch.object(app, "_key_for", return_value=("k", "env")), \
-                mock.patch.object(app, "run_ask", return_value=0) as ask:
+        self.add_key("deepseek", "deepseek-chat")
+        with mock.patch.object(app, "run_ask", return_value=0) as ask:
             code, _, _ = run(["carikan", "kertas", "termurah"])
         ask.assert_called_once()
         self.assertEqual(ask.call_args[0][0], "carikan kertas termurah")
@@ -130,11 +134,12 @@ class SetupTest(AppTestBase):
     def test_wizard_saves_provider_model_and_key(self):
         store = cfg.KeyStore(use_keychain=False)
         with mock.patch.object(app, "_store", return_value=store), \
-                mock.patch("inaproc_ai.list_models", return_value=["deepseek-chat", "deepseek-reasoner"]):
-            code, out, err = run(["setup"], inputs=["4", "1"], secret=["sk-ds-secret-9999"])
+                mock.patch("inaproc_ai.verify_key", return_value=["deepseek-chat", "deepseek-reasoner"]):
+            code, out, err = run(["setup"], inputs=["4", "1", ""], secret=["sk-ds-secret-9999"])
         self.assertEqual(code, 0, out + err)
-        self.assertEqual(cfg.load_settings(), {"provider": "deepseek", "model": "deepseek-chat"})
-        self.assertEqual(store.get("deepseek")[0], "sk-ds-secret-9999")
+        e = cfg.Profiles(store).ordered()[0]
+        self.assertEqual((e["provider"], e["model"]), ("deepseek", "deepseek-chat"))
+        self.assertEqual(cfg.Profiles(store).secret(e), "sk-ds-secret-9999")
         self.assertNotIn("sk-ds-secret-9999", out + err)
         self.assertIn("…9999", out + err)
 
@@ -142,17 +147,16 @@ class SetupTest(AppTestBase):
         import inaproc_ai
         store = cfg.KeyStore(use_keychain=False)
         with mock.patch.object(app, "_store", return_value=store), \
-                mock.patch("inaproc_ai.list_models", side_effect=inaproc_ai.AIError("ditolak")):
+                mock.patch("inaproc_ai.verify_key", side_effect=inaproc_ai.AIError("ditolak", "auth")):
             code, out, err = run(["setup"], inputs=["1"], secret=["bad"])
         self.assertNotEqual(code, 0)
-        self.assertEqual(store.get("anthropic"), (None, None))
+        self.assertEqual(cfg.Profiles(store).ordered(), [])
 
 
 class WhoamiTest(AppTestBase):
     def test_whoami_shows_account_and_ai(self):
-        cfg.save_settings({"provider": "anthropic", "model": "claude-opus-5-5"})
-        with mock.patch.object(app, "_key_for", return_value=("sk-ant-api03-zzzz1234", "Keychain")), \
-                mock.patch.object(app, "_penyedia_info",
+        self.add_key("anthropic", "claude-opus-5-5", key="sk-ant-api03-zzzz1234")
+        with mock.patch.object(app, "_penyedia_info",
                                   return_value={"signedIn": True, "name": "BAHRUL", "company": None,
                                                 "expires": "2026-11-23T13:00:00Z"}):
             code, out, err = run(["whoami"])
@@ -165,12 +169,11 @@ class WhoamiTest(AppTestBase):
 
 class AskFlowTest(AppTestBase):
     def test_ask_shows_live_steps_for_thinking_and_tools(self):
-        cfg.save_settings({"provider": "anthropic", "model": "claude-opus-5-5"})
+        self.add_key("anthropic", "claude-opus-5-5", key="k")
         replies = [(200, {"stop_reason": "tool_use", "content": [
                         {"type": "tool_use", "id": "t1", "name": "inaproc", "input": {"args": ["ppn"]}}]}),
                    (200, {"stop_reason": "end_turn", "content": [{"type": "text", "text": "PPN **12%**"}]})]
-        with mock.patch.object(app, "_key_for", return_value=("k", "env")), \
-                mock.patch("inaproc_ai.http_json", side_effect=lambda *a, **k: replies.pop(0)), \
+        with mock.patch("inaproc_ai.http_json", side_effect=lambda *a, **k: replies.pop(0)), \
                 mock.patch("inaproc_ai.run_cli", return_value=(0, "PPN rates: 12%", "")):
             code, out, err = run(["ask", "berapa ppn"])
         self.assertEqual(code, 0, err)

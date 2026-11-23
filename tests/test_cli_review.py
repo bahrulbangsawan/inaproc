@@ -132,14 +132,14 @@ class EnvKeyTest(AppTestBase):  # I6
         with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-old-1111"}), \
                 mock.patch.object(app, "_store", return_value=store), \
                 mock.patch("inaproc_ai.verify_key", return_value=["claude-opus-5-5"]):
-            code, out, err = run(["setup"], inputs=["1", "1"], secret=["sk-ant-new-2222"])
+            code, out, err = run(["setup"], inputs=["1", "1", ""], secret=["sk-ant-new-2222"])
         self.assertIn("ANTHROPIC_API_KEY", out + err)
 
 
 class EofTest(AppTestBase):  # I7
     def test_ctrl_d_in_the_menu_exits_cleanly(self):
         with mock.patch.object(app, "_interactive", return_value=True):
-            code, out, err = run([], inputs=[EOFError()])
+            code, out, err = run(["menu"], inputs=[EOFError()])
         self.assertNotIn("Traceback", err)
         self.assertIn(code, (0, 130))
 
@@ -213,9 +213,8 @@ class MinorsTest(AppTestBase):
         self.assertTrue(err)
 
     def test_typo_suggests_the_command_instead_of_calling_the_ai(self):
-        cfg.save_settings({"provider": "deepseek", "model": "deepseek-chat"})
-        with mock.patch.object(app, "_key_for", return_value=("k", "env")), \
-                mock.patch.object(app, "run_ask") as ask:
+        self.add_key("deepseek", "deepseek-chat")
+        with mock.patch.object(app, "run_ask") as ask:
             code, out, err = run(["serch", "kertas"])
         ask.assert_not_called()
         self.assertIn("search", out + err)

@@ -49,15 +49,35 @@ class TableTest(unittest.TestCase):
 
 
 class CardsTest(unittest.TestCase):
-    def test_wide_tables_become_cards_with_full_links(self):
-        url = "https://katalog.inaproc.id/raka-kencana/kertas-hvs-a4-80-gram-panjang-sekali"
-        out = ui.auto_table(["#", "Product", "Price", "Seller", "Location", "TKDN+BMP", "URL"],
-                            [["1", "Kertas HVS A4 80 gram", "Rp48.000", "RAKA KENCANA", "Margahayu", "84.83%", url]],
-                            color=False, max_width=80)
-        self.assertIn(url, out)                       # never cut
-        self.assertIn("Kertas HVS A4 80 gram", out)
-        self.assertIn("Seller: RAKA KENCANA", out)
-        self.assertTrue(all(ui.vlen(l) <= 80 or "https://" in l for l in out.splitlines()))
+    URL = "https://katalog.inaproc.id/raka-kencana/kertas-hvs-a4-80-gram-panjang-sekali"
+    HEAD = ["#", "Product", "Price", "Seller", "Location", "TKDN+BMP", "Kategori L1", "Kategori L2", "Kategori L3",
+            "URL"]
+
+    def _row(self, n):
+        return [str(n), "Kertas HVS A4 80 gram", "Rp48.000", "RAKA KENCANA", "Margahayu", "84.83%",
+                "Perlengkapan Alat Tulis", "Buku Tulis", "Buku Tulis Lainnya", self.URL]
+
+    def test_few_wide_rows_become_a_sideways_table(self):
+        out = ui.auto_table(self.HEAD, [self._row(1), self._row(2)], color=False, max_width=100)
+        lines = out.splitlines()
+        self.assertTrue(lines[0].startswith("╭"))
+        self.assertTrue(any(l.startswith("│ Seller") for l in lines))   # fields become rows
+        self.assertIn(self.URL, out)                                    # never cut
+        self.assertIn("Buku Tulis Lainnya", out)
+
+    def test_many_wide_rows_become_one_detail_table_each(self):
+        out = ui.auto_table(self.HEAD, [self._row(i) for i in range(1, 8)], color=False, max_width=80)
+        self.assertEqual(out.count("╭"), 7)
+        self.assertIn("│ Seller", out)
+        self.assertIn(self.URL, out)
+
+    def test_detail_tables_share_one_width(self):
+        rows = [self._row(i)[:-1] for i in range(1, 8)]              # no link column
+        rows[3] = ["4", "Map", "Rp1", "A", "B", "-", "C", "D", "E"]  # one row with only short values
+        out = ui.auto_table(self.HEAD[:-1], rows, color=False, max_width=100)
+        tops = [l for l in out.splitlines() if l.startswith("╭")]
+        self.assertEqual(len(tops), 7)
+        self.assertEqual(len({ui.vlen(t) for t in tops}), 1)
 
     def test_narrow_tables_stay_tables(self):
         out = ui.auto_table(["No", "Produk"], [["1", "Kertas"]], color=False, max_width=80)
@@ -67,6 +87,10 @@ class CardsTest(unittest.TestCase):
         out = ui.kv_table([["Penyedia", "BAHRUL"], ["AI", "belum diatur"]], color=False)
         self.assertEqual(len(out.splitlines()), 4)  # top, 2 rows, bottom
         self.assertIn("BAHRUL", out)
+
+    def test_headerless_markdown_table_renders_as_key_value(self):
+        out = ui.auto_table(["", ""], [["Status", "Selesai"], ["Total", "Rp1"]], color=False, max_width=80)
+        self.assertEqual(len(out.splitlines()), 4)
 
 
 class StepsTest(unittest.TestCase):
@@ -129,6 +153,16 @@ class PanelTest(unittest.TestCase):
         ui.panel("Safari belum siap", ["1. Buka Safari", "2. Centang opsi yang panjang sekali"], kind="warn", stream=out)
         widths = {ui.vlen(l) for l in out.getvalue().splitlines()}
         self.assertEqual(len(widths), 1, out.getvalue())
+
+
+class ColorOffTest(unittest.TestCase):
+    def test_color_false_means_no_escape_codes_even_on_a_terminal(self):
+        with mock.patch("sys.stdout", Tty()), mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NO_COLOR", None)
+            os.environ.pop("INAPROC_PLAIN", None)
+            self.assertNotIn("\x1b", ui.kv_table([["A", "b"]], color=False))
+            self.assertNotIn("\x1b", ui.auto_table(["A", "B"], [["1", "2"]], color=False))
+            self.assertNotIn("\x1b", ui.render_markdown("**x** `y`", color=False))
 
 
 class WrapTest(unittest.TestCase):

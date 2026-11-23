@@ -496,7 +496,9 @@ ROOT_FIELD = {"getListProduct": "listProduct", "getProductById": "getProduct",
               "createProductDraft": "createProductDraft", "updateProduct": "updateProduct",
               "updateProductDraft": "updateProductDraft", "deleteProduct": "deleteProduct",
               "updateProductActiveStatus": "updateProductActiveStatus",
-              "getAllProductCategoryListSearch": "allMinifiedProductCategory", "kbliByInstutionId": "getInstitutionByID"}
+              "getAllProductCategoryListSearch": "allMinifiedProductCategory", "kbliByInstutionId": "getInstitutionByID",
+              "OrderListMultishipment": "orderListV2", "getNegotiationList": "negotiationListV2",
+              "orderDetailV2": "orderDetailV2", "negotiationDetailV3": "negotiationDetailV3"}
 CATEGORY_BATCH = 50
 WRITE_OPS = {"createProduct", "createProductDraft", "updateProduct", "updateProductDraft", "deleteProduct",
              "updateProductActiveStatus"}
@@ -1310,6 +1312,219 @@ def cmd_apply(a):
         raise _err()("some writes failed (see above)")
 
 
+# ----------------------------------------------------------------------------- orders & negotiations (read-only)
+STATUS_ID = {
+    "COMPLETED": "Selesai", "DONE": "Selesai", "FINISHED": "Selesai", "CANCELLED": "Dibatalkan",
+    "CANCELLED_ON_NEGOTIATION": "Batal saat negosiasi", "EXPIRED": "Kedaluwarsa", "REJECTED": "Ditolak",
+    "ON_NEGOTIATION": "Negosiasi berjalan", "NEGOTIATION": "Negosiasi berjalan", "IN_NEGOTIATION": "Negosiasi berjalan",
+    "WAITING_SELLER_RESPONSE": "Menunggu respons penyedia", "WAITING_BUYER_RESPONSE": "Menunggu respons pembeli",
+    "WAITING_CONFIRMATION": "Menunggu konfirmasi", "WAITING_PAYMENT": "Menunggu pembayaran", "PAID": "Sudah dibayar",
+    "PROCESSING": "Diproses", "ON_PROCESS": "Diproses", "SHIPPED": "Dikirim", "ON_DELIVERY": "Dalam pengiriman",
+    "DELIVERED": "Diterima", "ACCEPTED": "Disetujui", "AGREED": "Disepakati", "DEAL": "Disepakati",
+}
+ROLE_ID = {"BUYER": "Pembeli", "SELLER": "Penyedia", "PPK": "PPK", "PP": "PP"}
+
+
+def status_label(raw):
+    if not raw:
+        return "-"
+    return STATUS_ID.get(raw) or raw.replace("_", " ").capitalize()
+
+
+def _date(ts):
+    return (ts or "")[:16].replace("T", " ") or "-"
+
+
+def _matches_status(raw, want):
+    w = (want or "").strip().lower()
+    return not w or w == "all" or w in (raw or "").lower() or w in status_label(raw).lower()
+
+
+def _paged(client, op, root_page, per_page, all_pages, page):
+    pages, out, last, total = ([page] if not all_pages else range(1, 51)), [], page, 0
+    for pg in pages:
+        d = client.gql(op, {"input": {"pagination": {"page": pg, "perPage": per_page}}}) or {}
+        out += d.get("items") or []
+        last, total = d.get("lastPage") or pg, d.get("total") or len(out)
+        if not all_pages or pg >= last:
+            break
+    return out, total, last
+
+
+def _find(items, ref):
+    ref = str(ref).strip()
+    for it in items:
+        if ref in (it.get("id"), it.get("orderNumber"), it.get("orderId"), it.get("orderKey")) or \
+                (it.get("orderNumber") or "").endswith(ref):
+            return it
+    return None
+
+
+def _lookup(client, op, ref):
+    for pg in range(1, 21):
+        d = client.gql(op, {"input": {"pagination": {"page": pg, "perPage": 50}}}) or {}
+        hit = _find(d.get("items") or [], ref)
+        if hit or pg >= (d.get("lastPage") or pg):
+            return hit
+    return None
+
+
+def order_rows(items):
+    rows = []
+    for o in items:
+        fi = o.get("firstItem") or {}
+        snap = fi.get("snapshot") or {}
+        ship = (o.get("shipments") or [{}])[0] or {}
+        rows.append({"orderNumber": o.get("orderNumber"), "date": _date(o.get("timestamp")),
+                     "status": status_label(o.get("status")), "statusCode": o.get("status"),
+                     "buyer": ((o.get("buyer") or {}).get("buyerSnapshot") or {}).get("institutionName"),
+                     "product": snap.get("name"), "qty": fi.get("qty"),
+                     "unit": (snap.get("stockUnit") or {}).get("primaryUnit"), "items": o.get("rowItemCount"),
+                     "total": o.get("total"), "viaNegotiation": bool(o.get("viaNegotiation")),
+                     "courier": " ".join(x for x in (ship.get("provider"), ship.get("service")) if x) or None,
+                     "id": o.get("id"), "orderKey": o.get("orderKey")})
+    return rows
+
+
+def nego_rows(items):
+    rows = []
+    for n in items:
+        fi = n.get("firstItem") or {}
+        rows.append({"orderNumber": n.get("orderNumber"), "date": _date(n.get("timestamp")),
+                     "status": status_label(n.get("status")), "statusCode": n.get("status"),
+                     "buyer": ((n.get("buyer") or {}).get("buyerSnapshot") or {}).get("institutionName"),
+                     "product": (fi.get("snapshot") or {}).get("name"), "qty": fi.get("qty"),
+                     "priceFirst": fi.get("originalPrice"), "priceLast": fi.get("lastPrice"),
+                     "totalFirst": n.get("originalTotal"), "totalLast": n.get("latestTotal"),
+                     "version": n.get("version"), "deadline": _date(n.get("expiryTime")) if n.get("expiryTime") else "-",
+                     "items": n.get("rowItemCount"), "id": n.get("id"), "orderId": n.get("orderId"),
+                     "orderKey": n.get("orderKey")})
+    return rows
+
+
+def _list_args(a):
+    return a.per_page, a.all, a.page
+
+
+def cmd_orders(a):
+    from inaproc import emit, table
+    b, c = _client(a)
+    try:
+        items, total, last = _paged(c, "OrderListMultishipment", "orderListV2", *_list_args(a))
+    finally:
+        b.close()
+    rows = [r for r in order_rows(items) if _matches_status(r["statusCode"], a.status)]
+    md = (f"**Pesanan Anda** — {len(rows)} ditampilkan dari {total} pesanan" +
+          ("" if a.all else f" (halaman {a.page} dari {last}; semua: --all)") + "\n\n" +
+          table(["No. pesanan", "Tanggal", "Status", "Instansi", "Produk (item pertama)", "Qty", "Item", "Total",
+                 "Nego", "Kurir"],
+                [[r["orderNumber"], r["date"], r["status"], r["buyer"], r["product"],
+                  f"{r['qty']} {r['unit'] or ''}".strip(), r["items"], _money(r["total"]),
+                  "ya" if r["viaNegotiation"] else "-", r["courier"]] for r in rows]) +
+          "\n\nDetail satu pesanan:  penyedia order <No. pesanan>")
+    emit(a, "penyedia-orders", a.status or "all", {"total": total, "items": rows}, md, {"orders": rows})
+
+
+def cmd_order(a):
+    from inaproc import emit, table, InaprocError
+    b, c = _client(a)
+    try:
+        hit = _lookup(c, "OrderListMultishipment", a.ref)
+        if not hit:
+            raise InaprocError(f"pesanan {a.ref} tidak ditemukan di daftar pesanan Anda")
+        o = c.gql("orderDetailV2", {"input": {"id": hit["id"], "orderKey": hit["orderKey"]}}) or {}
+    finally:
+        b.close()
+    ppk = (((o.get("buyerInfo") or {}).get("assignedPPK") or {}).get("buyerSnapshot") or {})
+    ship = o.get("shipmentSummary") or {}
+    items = []
+    for it in o.get("items") or []:
+        snap = it.get("snapshot") or {}
+        tax = it.get("tax") or {}
+        items.append({"product": snap.get("name"), "qty": it.get("qty"),
+                      "unit": (snap.get("stockUnit") or {}).get("primaryUnit"),
+                      "priceFirst": it.get("originalPrice"), "priceLast": it.get("lastPrice"),
+                      "subTotal": it.get("subTotal"), "ppnPercent": tax.get("ppnPercentage"), "ppn": tax.get("ppn")})
+    summary = [["No. pesanan", o.get("orderNumber")], ["Status", f"{status_label(o.get('status'))} ({o.get('status')})"],
+               ["Tanggal", _date(o.get("timestamp"))], ["Instansi", ppk.get("institutionName")],
+               ["Satuan kerja", ppk.get("nameSatuanKerja")], ["PPK", ppk.get("namaUser")],
+               ["Lewat negosiasi", "ya" if o.get("viaNegotiation") else "tidak"],
+               ["Pengiriman", " ".join(x for x in (ship.get("provider"), ship.get("service")) if x) or "-"],
+               ["Ongkir", _money(ship.get("totalShipmentPrice"))], ["Total sebelum pajak", _money(o.get("totalWithoutTax"))],
+               ["Total", _money(o.get("total"))]]
+    md = (f"**Pesanan {o.get('orderNumber')}**\n\n" + table(["", ""], summary) + "\n\n**Barang**\n\n" +
+          table(["Produk", "Qty", "Harga awal", "Harga akhir", "Subtotal", "PPN"],
+                [[i["product"], f"{i['qty']} {i['unit'] or ''}".strip(), _money(i["priceFirst"]),
+                  _money(i["priceLast"]), _money(i["subTotal"]),
+                  f"{i['ppnPercent']}% · {_money(i['ppn'])}" if i["ppnPercent"] is not None else "-"] for i in items]) +
+          (f"\n\nNegosiasi:  penyedia negotiation {o.get('orderNumber')}" if o.get("viaNegotiation") else ""))
+    emit(a, "penyedia-order", o.get("orderNumber") or a.ref, o, md,
+         {"order": [dict(summary)], "items": items})
+
+
+def cmd_negotiations(a):
+    from inaproc import emit, table
+    b, c = _client(a)
+    try:
+        items, total, last = _paged(c, "getNegotiationList", "negotiationListV2", *_list_args(a))
+    finally:
+        b.close()
+    rows = [r for r in nego_rows(items) if _matches_status(r["statusCode"], a.status)]
+    md = (f"**Negosiasi Anda** — {len(rows)} ditampilkan dari {total}" +
+          ("" if a.all else f" (halaman {a.page} dari {last}; semua: --all)") + "\n\n" +
+          table(["No. pesanan", "Tanggal", "Status", "Instansi", "Produk (item pertama)", "Qty", "Harga awal",
+                 "Harga terakhir", "Total awal", "Total terakhir", "Versi", "Batas waktu"],
+                [[r["orderNumber"], r["date"], r["status"], r["buyer"], r["product"], r["qty"], _money(r["priceFirst"]),
+                  _money(r["priceLast"]), _money(r["totalFirst"]), _money(r["totalLast"]), r["version"], r["deadline"]]
+                 for r in rows]) +
+          "\n\nRiwayat tawar-menawar:  penyedia negotiation <No. pesanan>")
+    emit(a, "penyedia-negotiations", a.status or "all", {"total": total, "items": rows}, md, {"negotiations": rows})
+
+
+def cmd_negotiation(a):
+    from inaproc import emit, table, InaprocError
+    b, c = _client(a)
+    try:
+        hit = _lookup(c, "getNegotiationList", a.ref)
+        if not hit:
+            raise InaprocError(f"negosiasi untuk {a.ref} tidak ditemukan di daftar negosiasi Anda")
+        n = c.gql("negotiationDetailV3", {"input": {"orderNegotiationId": hit["id"], "orderId": hit["orderId"],
+                                                    "orderKey": hit["orderKey"]}}) or {}
+    finally:
+        b.close()
+    reasons = n.get("reasons") or {}
+    why = []
+    for key, label in (("cancelReason", "Alasan batal"), ("rejectReason", "Alasan ditolak")):
+        r = reasons.get(key)
+        if r:
+            why.append([label, " · ".join(x for x in (r.get("reason"), r.get("reasonDescription"), _date(r.get("timestamp")))
+                                          if x and x != "-")])
+    summary = [["No. pesanan", hit.get("orderNumber")], ["Status", f"{status_label(n.get('status'))} ({n.get('status')})"],
+               ["Mulai", _date(n.get("timestamp"))],
+               ["Instansi", ((hit.get("buyer") or {}).get("buyerSnapshot") or {}).get("institutionName")],
+               ["Total awal", _money(n.get("originalTotal"))], ["Total terakhir", _money(n.get("latestTotal"))]] + why
+    history, items = [], []
+    for it in (n.get("negotiation") or {}).get("items") or []:
+        d = it.get("itemDetail") or {}
+        name = (d.get("snapshot") or {}).get("name")
+        items.append({"product": name, "qty": d.get("qty"), "priceFirst": d.get("originalPrice"),
+                      "priceLast": d.get("lastPrice"), "agreed": it.get("agreementPrice")})
+        for h in it.get("history") or []:
+            history.append({"product": name, "time": _date(h.get("createdAt")),
+                            "by": ROLE_ID.get(h.get("proposerRole"), h.get("proposerRole")),
+                            "old": h.get("oldPrice"), "new": h.get("newPrice")})
+    md = (f"**Negosiasi {hit.get('orderNumber')}**\n\n" + table(["", ""], summary) + "\n\n**Barang**\n\n" +
+          table(["Produk", "Qty", "Harga awal", "Harga terakhir", "Harga sepakat"],
+                [[i["product"], i["qty"], _money(i["priceFirst"]), _money(i["priceLast"]),
+                  _money(i["agreed"]) if i["agreed"] else "-"] for i in items]) +
+          "\n\n**Riwayat tawaran**\n\n" +
+          (table(["Waktu", "Diusulkan oleh", "Produk", "Harga lama", "Harga baru"],
+                 [[h["time"], h["by"], h["product"], _money(h["old"]), _money(h["new"])] for h in history])
+           if history else "_Belum ada tawaran._"))
+    emit(a, "penyedia-negotiation", hit.get("orderNumber") or a.ref, n, md,
+         {"negotiation": [dict(summary)], "items": items, "history": history})
+
+
 # ----------------------------------------------------------------------------- CLI wiring
 def add_parsers(sub, common):
     p = sub.add_parser("penyedia", help="your own seller account on penyedia.inaproc.id (your Safari, or Chrome)")
@@ -1366,6 +1581,17 @@ def add_parsers(sub, common):
     s.add_argument("--set", action="append", help="dotted.path=value on the update input (repeatable)")
     s = padd("delete", cmd_delete, "dry run: delete one or more of your products")
     s.add_argument("ids", nargs="+")
+    for name, fn, help_ in (("orders", cmd_orders, "pesanan Anda (status, instansi, total) — hanya baca"),
+                            ("negotiations", cmd_negotiations, "negosiasi Anda (harga awal vs terakhir) — hanya baca")):
+        s = add(name, fn, help_)
+        s.add_argument("--status", help="saring status, mis. selesai, batal, kedaluwarsa, negosiasi")
+        s.add_argument("--page", type=int, default=1)
+        s.add_argument("--per-page", type=int, default=20)
+        s.add_argument("--all", action="store_true", help="ambil semua halaman")
+    s = add("order", cmd_order, "detail satu pesanan (barang, harga, PPK, pengiriman) — hanya baca")
+    s.add_argument("ref", help="No. pesanan (EP-…), id, atau akhiran nomornya")
+    s = add("negotiation", cmd_negotiation, "detail satu negosiasi + riwayat tawaran — hanya baca")
+    s.add_argument("ref", help="No. pesanan (EP-…) atau id negosiasi")
     s = add("categories", cmd_categories, "categories your company's KBLI allows (as the add-product form checks)")
     s.add_argument("--search", help="only categories whose path contains this text")
     s.add_argument("--type", choices=["barang", "jasa", "digital"])

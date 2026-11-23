@@ -121,57 +121,75 @@ def table(headers, rows, color=None, max_width=None, stream=None):
     return "\n".join(out)
 
 
-def kv_table(rows, color=None, stream=None):
-    """Two-column box for label/value pairs (no header row)."""
-    st = Style(stream) if color is None else Style(None)
-    if color is True:
-        st.on = True
+def _style_for(color, stream):
+    st = Style(stream)
+    if color is not None:
+        st.on = bool(color)  # an explicit choice always wins (False = never any escape codes)
+    return st
+
+
+def kv_table(rows, color=None, stream=None, max_width=None, widths=None):
+    """Two-column box for label/value pairs (no header row). Links are never shortened."""
+    st = _style_for(color, stream)
     rows = [[str(a), "-" if b in (None, "") else str(b)] for a, b in rows]
-    w0 = max(vlen(r[0]) for r in rows)
-    w1 = min(max(vlen(r[1]) for r in rows), max(20, term_width() - w0 - 7))
+    width = max_width or term_width()
+    w0 = widths[0] if widths else max(vlen(r[0]) for r in rows)
+    w1 = widths[1] if widths else min(max(vlen(r[1]) for r in rows), max(20, width - w0 - 7))
     bar = st.gray("│")
     out = [st.gray("╭" + "─" * (w0 + 2) + "┬" + "─" * (w1 + 2) + "╮")]
-    out += [bar + " " + st.bold(_fit(a, w0)) + " " + bar + " " + _fit(b, w1) + " " + bar for a, b in rows]
+    for a, b in rows:
+        value = b if b.startswith(("http://", "https://")) and vlen(b) > w1 else _fit(b, w1)
+        out.append(bar + " " + st.bold(_fit(a, w0)) + " " + bar + " " + value + " " + bar)
     out.append(st.gray("╰" + "─" * (w0 + 2) + "┴" + "─" * (w1 + 2) + "╯"))
     return "\n".join(out)
 
 
+def _natural(headers, rows):
+    return sum(max([vlen(h)] + [vlen(r[i]) for r in rows if i < len(r)]) for i, h in enumerate(headers)) \
+        + 3 * len(headers) + 1
+
+
 def auto_table(headers, rows, color=None, max_width=None, stream=None):
-    """A box table when it fits the terminal; otherwise one card per row, with links shown in full."""
+    """Always a structured table: as is when it fits; turned sideways (fields as rows) for a few wide rows; one
+    labelled detail table per row when there are many. Links are never cut."""
     width = max_width or term_width()
-    natural = sum(max([vlen(h)] + [vlen(r[i]) for r in rows if i < len(r)]) for i, h in enumerate(headers))
-    if natural + 3 * len(headers) + 1 <= width or not rows:
+    rows = [["-" if c in (None, "") else str(c) for c in r] + ["-"] * (len(headers) - len(r)) for r in rows]
+    if headers and all(not str(h).strip() for h in headers):
+        return kv_table([r[:2] for r in rows], color=color, stream=stream, max_width=width)
+    if not rows or _natural(headers, rows) <= width:
         return table(headers, rows, color=color, max_width=width, stream=stream)
-    return cards(headers, rows, color=color, max_width=width, stream=stream)
-
-
-def cards(headers, rows, color=None, max_width=None, stream=None):
-    st = Style(stream) if color is None else Style(None)
-    if color is True:
-        st.on = True
-    width = max_width or term_width()
-    low = [h.strip().lower() for h in headers]
+    low = [str(h).strip().lower() for h in headers]
     num_i = next((i for i, h in enumerate(low) if h in ("#", "no", "no.")), None)
-    price_i = next((i for i, h in enumerate(low) if any(k in h for k in ("price", "harga"))), None)
-    title_i = next((i for i, h in enumerate(low) if i not in (num_i, price_i)), 0)
-    out = []
+    title_i = next((i for i, h in enumerate(low) if i != num_i), 0)
+    if len(rows) <= 4:
+        side_head = [""] + [(r[num_i] + ". " if num_i is not None else "") + r[title_i] for r in rows]
+        side_rows = [[h] + [r[i] for r in rows] for i, h in enumerate(headers) if i not in (num_i, title_i)]
+        if _natural(side_head, side_rows) <= width or len(rows) == 1:
+            if len(rows) == 1:
+                return kv_table([[headers[title_i], rows[0][title_i]]] + side_rows, color=color, stream=stream,
+                                max_width=width)
+            urls = [r for r in side_rows if any(c.startswith("http") for c in r[1:])]
+            body = [r for r in side_rows if r not in urls]
+            out = table(side_head, body, color=color, max_width=width, stream=stream)
+            for r in urls:
+                out += "\n" + "\n".join(f"  {side_head[j]}: {c}" for j, c in enumerate(r[1:], 1))
+            return out
+    all_pairs = []
     for r in rows:
-        cells = [str(c) if c not in (None, "") else "-" for c in r] + ["-"] * (len(headers) - len(r))
-        head = (st.cyan(cells[num_i].rjust(2)) + "  " if num_i is not None else "") + st.bold(cells[title_i])
-        if price_i is not None:
-            head += "  " + st.green(cells[price_i])
-        out.append(head)
-        facts, links = [], []
-        for i, h in enumerate(headers):
-            if i in (num_i, title_i, price_i) or cells[i] == "-":
-                continue
-            (links if cells[i].startswith(("http://", "https://")) else facts).append(
-                cells[i] if cells[i].startswith("http") else f"{st.gray(h + ':')} {cells[i]}")
-        for line in _wrap(" · ".join(facts), width - 4):
-            out.append("    " + line)
-        out += ["    " + st.cyan(l) for l in links]
-        out.append("")
-    return "\n".join(out).rstrip("\n")
+        pairs = [[headers[i], r[i]] for i in range(len(headers)) if i != num_i]
+        if num_i is not None:
+            pairs[0][1] = f"{r[num_i]}. {pairs[0][1]}"
+        all_pairs.append(pairs)
+    w0 = max(vlen(p[0]) for pairs in all_pairs for p in pairs)
+    w1 = min(max(vlen(p[1]) for pairs in all_pairs for p in pairs if not p[1].startswith("http")),
+             max(20, width - w0 - 7))
+    w1 = max(w1, min(width - w0 - 7, max(vlen(p[1]) for pairs in all_pairs for p in pairs)))
+    return "\n".join(kv_table(pairs, color=color, stream=stream, max_width=width, widths=(w0, w1))
+                     for pairs in all_pairs)
+
+
+def cards(headers, rows, color=None, max_width=None, stream=None):  # kept for callers; now structured tables
+    return auto_table(headers, rows, color=color, max_width=max_width, stream=stream)
 
 
 def panel(title, lines, kind="info", stream=None):
@@ -411,9 +429,7 @@ def mask(secret):
 
 def render_markdown(text, color=None, stream=None):
     """Light markdown for terminal answers: headings, **bold**, `code`, bullets. Tables pass through."""
-    st = Style(stream) if color is None else Style(None)
-    if color is True:
-        st.on = True
+    st = _style_for(color, stream)
     out = []
     for line in text.splitlines():
         m = re.match(r"^(#{1,6})\s+(.*)$", line)

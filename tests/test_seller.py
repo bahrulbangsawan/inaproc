@@ -45,7 +45,8 @@ class SellerClientTest(unittest.TestCase):
         self.assertEqual(set(ip.ALLOWED_OPS), {
             "getListProduct", "getProductById", "checkProductNameAvailability", "getAllProductCategoryListSeller",
             "requestUploadSignedUrl", "createProduct", "createProductDraft", "updateProduct", "updateProductDraft",
-            "deleteProduct", "updateProductActiveStatus", "getAllProductCategoryListSearch", "kbliByInstutionId"})
+            "deleteProduct", "updateProductActiveStatus", "getAllProductCategoryListSearch", "kbliByInstutionId",
+            "OrderListMultishipment", "getNegotiationList", "orderDetailV2", "negotiationDetailV3"})
         for name, text in ip.ALLOWED_OPS.items():
             if name not in ("createProduct", "createProductDraft", "updateProduct", "updateProductDraft",
                             "deleteProduct", "updateProductActiveStatus"):
@@ -243,6 +244,85 @@ class ExpiredTokenTest(unittest.TestCase):
         tab.wait_load = mock.Mock(return_value=True)
         with self.assertRaises(ip.NotSignedIn):
             fast_client(tab).list_products()
+
+
+ORDER = {"id": "01TESTORDER0000000000000A", "orderKey": "okey", "orderNumber": "EP-01TESTORDER0000000000000A",
+         "status": "CANCELLED_ON_NEGOTIATION", "timestamp": "2026-05-29T08:53:39Z", "total": 298201500.0,
+         "viaNegotiation": True, "rowItemCount": 1, "shipments": [{"provider": "Kurir Penyedia", "service": "CUSTOM"}],
+         "buyer": {"buyerSnapshot": {"institutionName": "Kab. Contoh"}},
+         "firstItem": {"snapshot": {"name": "AIO PC Contoh Core i3", "stockUnit": {"primaryUnit": "UNIT"}},
+                       "lastPrice": 14000000.0, "qty": 18}}
+NEGO = {"id": "neg1", "orderId": ORDER["id"], "orderKey": "okey", "orderNumber": ORDER["orderNumber"],
+        "status": "EXPIRED", "timestamp": "2026-05-29T08:53:40Z", "expiryTime": None, "version": 2,
+        "originalTotal": 298201500.0, "latestTotal": 282000000.0, "rowItemCount": 1,
+        "buyer": {"buyerSnapshot": {"institutionName": "Kab. Contoh"}},
+        "firstItem": {"snapshot": {"name": "AIO PC Contoh Core i3"}, "qty": 18, "originalPrice": 14925000.0,
+                      "lastPrice": 14000000.0}}
+ORDER_DETAIL = {"id": ORDER["id"], "orderNumber": ORDER["orderNumber"], "orderKey": "okey", "status": ORDER["status"],
+                "timestamp": ORDER["timestamp"], "total": 298201500.0, "totalWithoutTax": 279720000.0,
+                "viaNegotiation": True, "orderNegotiationIds": ["neg1"],
+                "items": [{"qty": 18, "originalPrice": 14925000.0, "lastPrice": 14000000.0, "subTotal": 279720000.0,
+                           "tax": {"ppnPercentage": 12, "ppn": 1540000.0},
+                           "snapshot": {"name": "AIO PC Contoh Core i3", "stockUnit": {"primaryUnit": "UNIT"}}}],
+                "buyerInfo": {"assignedPPK": {"buyerSnapshot": {"namaUser": "Budi Contoh", "institutionName": "Kab. Contoh",
+                                                                "nameSatuanKerja": "RSUD Contoh"}}},
+                "shipmentSummary": {"provider": "Kurir Penyedia", "service": "CUSTOM", "totalShipmentPrice": 0}}
+NEGO_DETAIL = {"status": "EXPIRED", "originalTotal": 298201500.0, "latestTotal": 282000000.0, "timestamp": "2026-05-29",
+               "orderNegotiationId": "neg1",
+               "negotiation": {"items": [{"itemDetail": {"qty": 18, "originalPrice": 14925000.0, "lastPrice": 14000000.0,
+                                                         "snapshot": {"name": "AIO PC Contoh Core i3"}},
+                                          "history": [{"createdAt": "2026-05-29T09:00:00Z", "oldPrice": 14925000.0,
+                                                       "newPrice": 14000000.0, "proposerRole": "BUYER"}]}]},
+               "reasons": {"cancelReason": {"reason": "timeout", "timestamp": "2026-06-05T17:09:58Z"}}}
+
+
+class OrdersTest(unittest.TestCase):
+    def _tab(self):
+        return FakeTab({"OrderListMultishipment": {"orderListV2": {"items": [ORDER], "total": 1, "currentPage": 1,
+                                                                    "lastPage": 1}},
+                        "getNegotiationList": {"negotiationListV2": {"items": [NEGO], "total": 1, "currentPage": 1,
+                                                                      "lastPage": 1}},
+                        "orderDetailV2": {"orderDetailV2": ORDER_DETAIL},
+                        "negotiationDetailV3": {"negotiationDetailV3": NEGO_DETAIL}})
+
+    def _run(self, argv):
+        tab = self._tab()
+        with mock.patch.object(ip, "open_penyedia", return_value=(mock.MagicMock(), tab)), \
+                mock.patch.object(ip, "session_info", return_value={"signedIn": True}):
+            return run_main(argv + ["--min-interval", "0.5"]), tab
+
+    def test_orders_table(self):
+        (code, out, err), tab = self._run(["penyedia", "orders"])
+        self.assertEqual(code, 0, err)
+        for text in ("EP-01TESTORDER0000000000000A", "Kab. Contoh", "AIO PC Contoh", "Rp298.201.500", "Batal"):
+            self.assertIn(text, out)
+        self.assertEqual(tab.calls[0]["variables"], {"input": {"pagination": {"page": 1, "perPage": 20}}})
+
+    def test_order_detail_by_number(self):
+        (code, out, err), tab = self._run(["penyedia", "order", "EP-01TESTORDER0000000000000A"])
+        self.assertEqual(code, 0, err)
+        for text in ("RSUD Contoh", "Budi Contoh", "Rp14.925.000", "Rp14.000.000", "18"):
+            self.assertIn(text, out)
+        detail_call = [c for c in tab.calls if c["operationName"] == "orderDetailV2"][0]
+        self.assertEqual(detail_call["variables"], {"input": {"id": ORDER["id"], "orderKey": "okey"}})
+
+    def test_negotiations_table_and_detail(self):
+        (code, out, err), tab = self._run(["penyedia", "negotiations"])
+        self.assertEqual(code, 0, err)
+        for text in ("Kedaluwarsa", "Rp298.201.500", "Rp282.000.000"):
+            self.assertIn(text, out)
+        (code, out, err), tab = self._run(["penyedia", "negotiation", "EP-01TESTORDER0000000000000A"])
+        self.assertEqual(code, 0, err)
+        for text in ("Pembeli", "Rp14.925.000", "Rp14.000.000", "timeout"):
+            self.assertIn(text, out)
+        call = [c for c in tab.calls if c["operationName"] == "negotiationDetailV3"][0]
+        self.assertEqual(call["variables"], {"input": {"orderNegotiationId": "neg1", "orderId": ORDER["id"],
+                                                       "orderKey": "okey"}})
+
+    def test_status_filter(self):
+        (code, out, err), tab = self._run(["penyedia", "orders", "--status", "SELESAI"])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("AIO PC Contoh", out)
 
 
 class ProductsCommandTest(unittest.TestCase):
