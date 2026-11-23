@@ -58,6 +58,8 @@ curl -fsSL https://raw.githubusercontent.com/bahrulbangsawan/inaproc/main/instal
 
 Replace `claude` with `codex` for Codex, or `all` for Claude Code + Codex + a zip for Claude.ai. Then restart your assistant and type **`/inaproc`** or just ask about INAPROC products.
 
+The installer also adds the standalone **`inaproc`** command (in `~/.local/bin`). Open a new terminal and type `inaproc` for the menu, or `inaproc setup` to turn on the AI mode with your own API key. See [Standalone CLI + AI mode](#-standalone-cli--ai-mode).
+
 > [!TIP]
 > On **Claude.ai**, **Claude Desktop** or **ChatGPT** there's nothing to install on your computer. See [Claude.ai](#claudeai--claude-desktop) and [ChatGPT](#chatgpt).
 
@@ -67,7 +69,22 @@ Replace `claude` with `codex` for Codex, or `all` for Claude Code + Codex + a zi
 
 No Claude Code or Claude Desktop needed: the installer also adds an **`inaproc`** command with a guided menu, a live view of every background step, and an **AI assistant that runs on your own API key** (Anthropic, OpenAI, OpenRouter or DeepSeek). The AI runs the searches, comparisons, RAB work and your penyedia tasks itself, then analyses the results for you.
 
-<!-- DEMO -->
+<p align="center">
+  <img src="docs/media/inaproc-cli-demo.gif" alt="inaproc CLI demo: logo and menu, doctor, whoami, cheapest search, KBLI categories, your products, a dry-run update and an AI comparison" width="900">
+</p>
+
+<p align="center"><sub>End-to-end run on a real account, recorded with <a href="https://cap.so">Cap</a> (sped up 1.6×) · <a href="docs/media/inaproc-cli-demo.mp4">full-quality MP4</a> · read-only: the update is a dry run and nothing was sent.</sub></p>
+
+What the recording shows, in order:
+
+1. `inaproc` — ASCII logo, AI status and the command list
+2. `inaproc doctor` — Python, catalogue connection, Safari permission, penyedia login and API key all ✓
+3. `inaproc whoami` — the signed-in penyedia account, AI provider/model and the masked key
+4. `inaproc cheapest "kertas hvs a4 80 gram" --top 3` — results as cards with full links
+5. `inaproc penyedia categories --search "Peralatan Surat"` — eligible categories by KBLI, Level 1 › 2 › 3
+6. `inaproc penyedia products` — your own products
+7. `inaproc penyedia product update … --stock 999` — a dry run with a before/after table; nothing is sent
+8. `inaproc "bandingkan 3 kertas HVS A4 80 gram termurah yang PDN, mana yang paling layak untuk instansi?"` — the AI runs `cheapest` and `compare` itself (each step shown live), then answers with its analysis, a table and the links
 
 ```bash
 inaproc                 # menu interaktif (logo, pilih nomor, tanpa hafal perintah)
@@ -126,6 +143,7 @@ inaproc doctor          # cek koneksi, Safari, login penyedia, API key — denga
 | 🏬 | **Your products (penyedia)** | List and inspect the products in **your** penyedia.inaproc.id account, through your own signed-in Safari (macOS) |
 | 🏷 | **Eligible categories by KBLI** | Every category your company's KBLI allows — the same check as the add-product form's *"Anda tidak memiliki KBLI yang sesuai"* — split into Level 1 › Level 2 › Level 3, exportable to CSV/XLSX/JSON/YAML |
 | ✏️ | **Add · update · bulk-update · delete** | Add a product (copy of one of yours, saved as a draft), change price/stock/name, update many products from a CSV/XLSX, delete products. Every change is a **dry run you approve**, then `penyedia apply` sends exactly that plan and logs it |
+| 🖥 | **Standalone CLI + AI** | `inaproc` command with a guided menu, live progress, and an AI assistant on your own Anthropic / OpenAI / OpenRouter / DeepSeek key that searches, compares and analyses for you |
 | 🕵️ | **Zero installs** | Chrome-style request headers, and a `discover` mode that drives your own Chrome to re-capture the API if the site changes |
 
 ### How it works
