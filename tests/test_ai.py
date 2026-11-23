@@ -103,6 +103,13 @@ class OpenAILoopTest(unittest.TestCase):
         self.assertIn("error", http.requests[1]["body"]["messages"][-1]["content"].lower())
 
 
+class SystemPromptTest(unittest.TestCase):
+    def test_cli_answers_in_chat_unless_a_file_is_requested(self):
+        sp = ai.system_prompt()
+        self.assertIn("Do not ask about the output format", sp)
+        self.assertIn("one-off question", sp)
+
+
 class ModelsTest(unittest.TestCase):
     def test_list_models(self):
         http = FakeHTTP([(200, {"data": [{"id": "claude-opus-5-5"}, {"id": "claude-haiku-5-5"}]})])
