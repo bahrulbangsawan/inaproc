@@ -112,6 +112,11 @@ class SafariGuideTest(AppTestBase):
             code, out, err = run(["penyedia", "status"])
         self.assertIn("Automation", out + err)
 
+    def test_safari_timeout_explains_the_permission_dialog(self):
+        g = app.guide_for("Safari did not answer in time")
+        self.assertIsNotNone(g)
+        self.assertIn("OK", " ".join(g[2]))
+
     def test_not_signed_in_guide(self):
         with mock.patch("inaproc.main",
                         side_effect=lambda a: print("error: not signed in to penyedia.inaproc.id; run `penyedia login`",

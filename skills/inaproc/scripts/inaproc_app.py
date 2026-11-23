@@ -134,6 +134,14 @@ def guide_for(error_text):
             f"2. Cari {_terminal_name()} dan nyalakan sakelar Safari di bawahnya.",
             "3. Jika tidak ada di daftar: jalankan perintah tadi lagi dan klik OK saat macOS bertanya.",
             "4. Jalankan perintah tadi lagi."], ("url", AUTOMATION_URL))
+    if "did not answer in time" in t:
+        return ("warn", "Safari belum menjawab — kemungkinan ada dialog izin", [
+            f"1. macOS kemungkinan sedang bertanya: \"{_terminal_name()} ingin mengendalikan Safari\". Cari dialog "
+            "itu (bisa tertutup jendela lain) dan klik OK.",
+            "2. Jika tidak ada dialog: buka System Settings ▸ Privacy & Security ▸ Automation, cari aplikasi "
+            "terminal Anda, nyalakan Safari.",
+            "3. Pastikan Safari tidak sedang menampilkan dialog/peringatan sendiri.",
+            "4. Jalankan perintah tadi lagi."], ("url", AUTOMATION_URL))
     if "not signed in" in t or "signed out" in t or "refused the call" in t:
         return ("info", "Anda belum login di penyedia.inaproc.id", [
             "1. Jalankan:  inaproc login   (Safari terbuka di halaman penyedia).",
