@@ -76,7 +76,8 @@ class KeyStore:
     def __init__(self, runner=subprocess.run, use_keychain=None):
         self.run = runner
         if use_keychain is None:
-            use_keychain = platform.system() == "Darwin" and shutil.which("security") is not None
+            use_keychain = (platform.system() == "Darwin" and shutil.which("security") is not None
+                            and os.environ.get("INAPROC_NO_KEYCHAIN") != "1")
         self.keychain = use_keychain
 
     def _file(self):

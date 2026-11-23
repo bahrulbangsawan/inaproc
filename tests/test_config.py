@@ -90,3 +90,10 @@ class ConfigTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SafetyNetTest(unittest.TestCase):
+    def test_tests_never_use_the_real_home_or_keychain(self):
+        self.assertNotEqual(os.path.realpath(cfg.home()),
+                            os.path.realpath(os.path.join(os.path.expanduser("~"), ".inaproc")))
+        self.assertFalse(cfg.KeyStore().keychain)
