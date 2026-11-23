@@ -112,32 +112,98 @@ def complete(prefix):
 
 # ------------------------------------------------------------------------------------------------ conversation
 class Body:
-    """Conversation lines as (text, kind). kind: plain | user-head | user | ai-head | ai | ai-foot | ok | fail | dim."""
+    """Conversation lines as (text, kind). kind: plain | user-head | user | ai-head | ai | ai-foot | ok | fail | dim.
+    Thread-safe; `version` changes on every edit, `clears` on every clear (the View uses both)."""
 
     def __init__(self, limit=6000):
-        self.lines, self.limit, self.offset = [], limit, 0
+        self.lines, self.limit = [], limit
+        self.version, self.clears, self.added = 0, 0, 0   # added: lines ever appended (numbers stay stable)
         self._lock = threading.Lock()
 
     def add(self, text, kind="plain"):
         with self._lock:
             for line in str(text).splitlines() or [""]:
-                self.lines.append((ui.ANSI.sub("", line), kind))
+                self.lines.append((ui.ANSI.sub("", line).replace("\t", "    "), kind))
+                self.added += 1
             del self.lines[:-self.limit]
-            self.offset = 0
+            self.version += 1
 
     def clear(self):
         with self._lock:
-            self.lines, self.offset = [], 0
+            self.lines = []
+            self.version += 1
+            self.clears += 1
 
-    def scroll(self, n, page=1):
-        """Move the view; it stops when the top of the conversation fills the page (never a blank screen)."""
+    def snapshot(self):
         with self._lock:
-            self.offset = max(0, min(self.offset + n, max(0, len(self.lines) - max(1, page))))
+            return list(self.lines), self.version, self.clears, self.added
 
-    def visible(self, height):
-        with self._lock:
-            end = len(self.lines) - self.offset
-            return list(self.lines[max(0, end - height):end])
+
+class View:
+    """Where the conversation area looks. The offset counts screen rows (after wrapping) above the bottom, so the
+    very first line is always reachable; scrolling stops with a full page at the top and at the bottom. A reader who
+    has scrolled up stays on the same lines while output arrives, old lines are dropped or the window is resized;
+    rows that arrived since are counted in `new_below`."""
+
+    def __init__(self):
+        self.offset, self.new_below = 0, 0
+        self.rows, self.src, self._key, self._clears = [], [], None, 0
+        self._unseen = None       # number of the first line that arrived while scrolled up
+
+    def layout(self, body, width):
+        lines, version, clears, added = body.snapshot()
+        key = (version, width)
+        if key == self._key:
+            return self.rows
+        first = added - len(lines)                      # number of the oldest line still kept
+        rows, src = [], []
+        for i, item in enumerate(lines):
+            part = _wrap_one(item, width)
+            rows += part
+            src += [first + i] * len(part)
+        if clears != self._clears:
+            self.offset, self.new_below, self._unseen, self._clears = 0, 0, None, clears
+        elif self.offset > 0 and self.rows:
+            at = len(self.rows) - 1 - min(self.offset, len(self.rows) - 1)   # bottom row on screen
+            line = self.src[at]
+            nth = at - self.src.index(line)                                  # its row within that line
+            if self._unseen is None and self._key is not None:
+                seen = self.src[-1] + 1
+                if added > seen:
+                    self._unseen = seen
+            try:
+                start = src.index(line)
+                count = src.count(line)
+                self.offset = len(rows) - 1 - (start + min(nth, count - 1))
+            except ValueError:                                               # that line was dropped
+                self.offset = len(rows)
+            if self._unseen is not None:
+                self.new_below = min(self.offset, sum(1 for n in src if n >= self._unseen))
+        self.rows, self.src, self._key = rows, src, key
+        return rows
+
+    def _clamp(self, height):
+        self.offset = max(0, min(self.offset, max(0, len(self.rows) - max(1, height))))
+        if self.offset == 0:
+            self.new_below, self._unseen = 0, None
+
+    def scroll(self, n, height):
+        self.offset += n
+        self._clamp(height)
+        if n < 0:
+            self.new_below = min(self.new_below, self.offset)
+
+    def to_bottom(self):
+        self.offset, self.new_below, self._unseen = 0, 0, None
+
+    def to_top(self, height):
+        self.offset = len(self.rows)
+        self._clamp(height)
+
+    def window(self, height):
+        self._clamp(height)
+        end = len(self.rows) - self.offset
+        return self.rows[max(0, end - height):end]
 
 
 def add_user(body, text):
@@ -159,15 +225,26 @@ def add_answer(body, markdown, footer=None):
 GUTTER = {"ai": "│ ", "user": "▍ ", "ai-foot": "╰ "}
 
 
+def _wrap_one(item, width):
+    text, kind = (item, "plain") if isinstance(item, str) else item
+    gutter = GUTTER.get(kind, "")
+    room = max(10, width - ui.vlen(gutter))
+    parts = _wrap(text, room)
+    return [(gutter + p if kind != "ai-foot" or i == 0 else "  " + p, kind) for i, p in enumerate(parts)]
+
+
+def wrap_rows(lines, width):
+    rows = []
+    for item in lines:
+        rows += _wrap_one(item, width)
+    return rows
+
+
 def screen_rows(lines, width, height):
     """The last `height` screen rows as (text, kind); long lines wrap, answers keep their left bar."""
     rows = []
     for item in reversed(lines):
-        text, kind = (item, "plain") if isinstance(item, str) else item
-        gutter = GUTTER.get(kind, "")
-        room = max(10, width - ui.vlen(gutter))
-        parts = _wrap(text, room)
-        rows[:0] = [(gutter + p if kind != "ai-foot" or i == 0 else "  " + p, kind) for i, p in enumerate(parts)]
+        rows[:0] = _wrap_one(item, width)
         if len(rows) >= height:
             break
     return rows[-height:]
@@ -199,15 +276,98 @@ def _wrap(text, room):
 
 
 def wheel_delta(bstate):
-    """Mouse wheel: up -> +1 (older lines), down -> -1, anything else 0."""
+    """curses mouse state -> wheel direction (kept for terminals that only report through curses)."""
     import curses
-    up = getattr(curses, "BUTTON4_PRESSED", 0x80000)
-    down = getattr(curses, "BUTTON5_PRESSED", 0x200000)
+    up = getattr(curses, "BUTTON4_PRESSED", 0) or 0x80000
+    down = getattr(curses, "BUTTON5_PRESSED", 0) or 0x200000
     if bstate & up:
         return 1
     if bstate & down:
         return -1
     return 0
+
+
+class InputDecoder:
+    """Raw keyboard input -> events. The TUI turns on the terminal's own mouse reporting (SGR, mode 1006) and
+    bracketed paste (mode 2004) and decodes them here, because some curses builds cannot report the wheel turning
+    down (BUTTON5 = 0). Events: ("key", k) | ("wheel", +1 up / -1 down) | ("paste", text)."""
+
+    PASTE_END = "\x1b[201~"
+
+    def __init__(self):
+        self.buf, self.paste, self.since = "", None, 0.0
+
+    @property
+    def pending(self):
+        return bool(self.buf) and self.paste is None
+
+    def feed(self, ch):
+        if self.paste is not None:
+            self.paste += ch if isinstance(ch, str) else ""
+            if self.paste.endswith(self.PASTE_END):
+                text = self.paste[:-len(self.PASTE_END)]
+                self.paste = None
+                return [("paste", " ".join(text.replace("\r", "\n").split()))]
+            return []
+        if not isinstance(ch, str):  # a key curses already decoded (KEY_UP, KEY_RESIZE, …)
+            return self.flush() + [("key", ch)]
+        if not self.buf:
+            if ch == "\x1b":
+                self.buf, self.since = ch, time.time()
+                return []
+            return [("key", ch)]
+        self.buf += ch
+        b = self.buf
+        if len(b) == 2 and ch not in "[O":  # ESC + a normal key (Alt-combination or a quick Esc then a key)
+            self.buf = ""
+            return [("key", "\x1b"), ("key", ch)]
+        if b.startswith("\x1bO") and len(b) == 3:  # SS3 form (application keypad): ESC O A, ESC O H, …
+            self.buf = ""
+            k = _nav_key(ch)
+            return [("key", k)] if k is not None else []
+        if b.startswith("\x1b[<"):
+            if ch in "Mm":
+                self.buf = ""
+                try:
+                    button = int(b[3:-1].split(";")[0])
+                except ValueError:
+                    return []
+                if ch == "M" and button & 64:
+                    return [("wheel", 1 if button & 1 == 0 else -1)]
+                return []
+            if len(b) > 40:
+                self.buf = ""
+            return []
+        if b == "\x1b[200~":
+            self.buf, self.paste = "", ""
+            return []
+        if len(b) > 2 and 0x40 <= ord(ch) <= 0x7E and not "\x1b[200~".startswith(b):
+            self.buf = ""
+            k = _nav_key(ch) if len(b) == 3 else (_tilde_key(b[2:-1]) if ch == "~" else None)
+            # navigation keys in the normal (CSI) form; anything else we don't use is dropped, never typed
+            return [("key", k)] if k is not None else []
+        return []
+
+    def flush(self):
+        """Called when no more input arrives: a lone ESC is the Esc key; a half sequence is dropped."""
+        b, self.buf = self.buf, ""
+        return [("key", "\x1b")] if b == "\x1b" else []
+
+
+def _nav_key(final):
+    import curses
+    return {"A": curses.KEY_UP, "B": curses.KEY_DOWN, "C": curses.KEY_RIGHT, "D": curses.KEY_LEFT,
+            "H": curses.KEY_HOME, "F": curses.KEY_END}.get(final)
+
+
+def _tilde_key(code):
+    import curses
+    return {"1": curses.KEY_HOME, "7": curses.KEY_HOME, "4": curses.KEY_END, "8": curses.KEY_END,
+            "5": curses.KEY_PPAGE, "6": curses.KEY_NPAGE, "3": curses.KEY_DC, "2": curses.KEY_IC}.get(code)
+
+
+MOUSE_ON = "\x1b[?1000h\x1b[?1006h\x1b[?2004h"
+MOUSE_OFF = "\x1b[?2004l\x1b[?1006l\x1b[?1000l"
 
 
 # ------------------------------------------------------------------------------------------------ in-TUI prompts
@@ -396,6 +556,11 @@ class App:
         import curses
         self.c, self.scr, self.version = curses, scr, version
         self.body = Body()
+        self.view = View()
+        self.decoder = InputDecoder()
+        self._last_wheel = 0.0
+        self.page = 1
+        self.state_file = os.environ.get("INAPROC_TUI_STATE")
         self.input, self.history, self.hpos = "", [], None
         self.busy = False
         self.steps = TuiSteps(self)
@@ -491,15 +656,21 @@ class App:
         bottom_rows = 2 + (min(len(sugg), 7) if sugg else 0)
         height = max(1, h - top - bottom_rows)
         self.page = height
-        self.body.scroll(0, page=height)  # re-clamp after a resize
-        for i, (row, kind) in enumerate(screen_rows(self.body.visible(height), w, height)):
+        self.view.layout(self.body, w)
+        shown = self.view.window(height)
+        self.top_row = shown[0][0] if shown else None
+        for i, (row, kind) in enumerate(shown):
             if kind == "ai":
                 self.put(top + i, 0, row[:2], self.attr["cyan"])
                 self.put(top + i, 2, row[2:], 0)
             else:
                 self.put(top + i, 0, row, self.style(kind))
-        if self.body.offset:
-            self.put(top, max(0, w - 30), f" ↑ {self.body.offset} baris di atas · End ", self.attr["yellow"])
+        if self.view.offset:
+            tag = f" ↑ {self.view.offset} baris di atas"
+            if self.view.new_below:
+                tag += f" · ↓ {self.view.new_below} baris baru"
+            tag += " · End ke bawah "
+            self.put(top + height - 1, max(0, w - ui.vlen(tag) - 1), tag, self.attr["yellow"] | self.c.A_REVERSE)
         y = h - bottom_rows
         for name in sugg[:7]:
             c = next(x for x in COMMANDS if x.name == name)
@@ -515,20 +686,31 @@ class App:
         else:
             self.put(h - 2, 0, "─" * w, self.attr["gray"])
         self.put(h - 1, 0, "❯ ", self.attr["magenta"] | self.c.A_BOLD)
-        if self.busy:
-            self.put(h - 1, 2, "(tunggu sampai selesai…)", self.attr["gray"])
+        if self.busy and not self.input:
+            self.put(h - 1, 2, "(boleh mengetik; Enter setelah selesai)", self.attr["gray"])
         elif not self.input:
             self.put(h - 1, 2, "Tanya apa saja, atau ketik / untuk menu", self.attr["gray"])
         else:
-            self.put(h - 1, 2, self.input, 0)
+            self.put(h - 1, 2, self._input_tail(w - 3), 0)
         if self.modal:
             self.draw_modal(h, w)
         try:
-            self.c.curs_set(0 if self.busy or self.modal else 1)
-            self.scr.move(h - 1, min(w - 1, 2 + ui.vlen(self.input)))
+            self.c.curs_set(0 if self.modal or (self.busy and not self.input) else 1)
+            self.scr.move(h - 1, min(w - 1, 2 + ui.vlen(self._input_tail(w - 3))))
         except self.c.error:
             pass
         self.scr.refresh()
+
+    def _input_tail(self, room):
+        """Long input scrolls sideways so the end you are typing stays visible."""
+        if ui.vlen(self.input) <= room:
+            return self.input
+        tail, w = "", 1
+        for ch in reversed(self.input):
+            if w + ui.vlen(ch) > room:
+                break
+            tail, w = ch + tail, w + ui.vlen(ch)
+        return "…" + tail
 
     def draw_modal(self, h, w):
         m, a = self.modal, self.attr
@@ -665,6 +847,7 @@ class App:
             return
         if not self.history or self.history[-1] != text:
             self.history.append(text)
+        self.view.to_bottom()
         kind, payload = parse(text)
         if kind == "ai":
             add_user(self.body, text)
@@ -737,21 +920,23 @@ class App:
                 _, _, _, _, bstate = c.getmouse()
             except c.error:
                 return
-            self.body.scroll(3 * wheel_delta(bstate), page=getattr(self, "page", 1))
+            self.view.scroll(3 * wheel_delta(bstate), self.page)
             return
         if k == c.KEY_PPAGE:
-            self.body.scroll(self.scr.getmaxyx()[0] // 2, page=getattr(self, "page", 1))
+            self.view.scroll(max(1, self.page - 2), self.page)
             return
         if k == c.KEY_NPAGE:
-            self.body.scroll(-(self.scr.getmaxyx()[0] // 2), page=getattr(self, "page", 1))
+            self.view.scroll(-max(1, self.page - 2), self.page)
             return
         if k == c.KEY_END:
-            self.body.offset = 0
+            self.view.to_bottom()
             return
-        if self.busy:
-            return  # nothing typed while working can answer a later question
+        if k == c.KEY_HOME and not self.input:
+            self.view.to_top(self.page)
+            return
         if k in ("\n", "\r", c.KEY_ENTER):
-            self.submit()
+            if not self.busy:     # typing is fine while a job runs; sending waits until it is done
+                self.submit()
         elif k in (c.KEY_BACKSPACE, "\x7f", "\b"):
             self.input = self.input[:-1]
         elif k == "\t":
@@ -774,33 +959,97 @@ class App:
         elif isinstance(k, str) and k.isprintable():
             self.input += k
 
+    def event(self, ev, step=3):
+        kind, val = ev
+        if kind == "wheel":
+            self.view.scroll(step * val, self.page)
+        elif kind == "paste":
+            if self.modal and self.modal["kind"] == "ask":
+                self.modal["value"] += val
+            elif not self.modal:
+                self.input += val
+        else:
+            self.key(val)
+
+    def dump_state(self):
+        if not self.state_file:
+            return
+        import json
+        try:
+            with open(self.state_file + ".tmp", "w", encoding="utf-8") as f:
+                json.dump({"offset": self.view.offset, "newBelow": self.view.new_below, "rows": len(self.view.rows),
+                           "page": self.page, "topRow": getattr(self, "top_row", None), "input": self.input,
+                           "hpos": self.hpos, "history": self.history, "busy": self.busy,
+                           "modal": (self.modal or {}).get("kind"), "size": list(self.scr.getmaxyx()),
+                           "t": time.time()}, f)
+            os.replace(self.state_file + ".tmp", self.state_file)
+        except OSError:
+            pass
+
+    def _term(self, seq):
+        try:
+            os.write(sys.__stdout__.fileno(), seq.encode())
+        except OSError:
+            pass
+
+    def _drain_keys(self, first):
+        """Everything already waiting, so one swipe (dozens of wheel events, ~12 bytes each) is handled before the
+        next frame instead of one byte per frame, which kept the screen scrolling long after the wheel stopped."""
+        keys = [first]
+        self.scr.nodelay(True)
+        try:
+            while len(keys) < 8192:
+                try:
+                    keys.append(self.scr.get_wch())
+                except self.c.error:
+                    break
+        finally:
+            self.scr.timeout(60)
+        return keys
+
+    def handle(self, keys):
+        events = []
+        for k in keys:
+            if k != self.c.KEY_RESIZE:
+                events += self.decoder.feed(k)
+        wheels = sum(1 for kind, _ in events if kind == "wheel")
+        step = 3
+        if wheels:
+            now = time.time()
+            if wheels > 2 or now - self._last_wheel < 0.08:
+                step = 1                    # a lone notch moves 3 rows; a swipe (a stream of events) 1 row each
+            self._last_wheel = now
+        for ev in events:
+            self.event(ev, step)
+
     def loop(self):
         c = self.c
-        self.scr.timeout(90)
+        self.scr.timeout(60)
         self.scr.keypad(True)
-        try:  # capture the wheel so it scrolls the conversation instead of sending ↑/↓ (history)
-            c.mousemask(c.ALL_MOUSE_EVENTS | c.REPORT_MOUSE_POSITION)
-            c.mouseinterval(0)
-        except Exception:  # noqa: BLE001
-            pass
-        while not self.quit:
-            self.draw()
-            try:
-                k = self.scr.get_wch()
-            except c.error:
-                continue
-            except KeyboardInterrupt:
-                if self.modal:
-                    self.modal["cancel"] = True
-                    self.modal["event"].set()
+        self._term(MOUSE_ON)  # wheel + bracketed paste, decoded by InputDecoder (works on every curses build)
+        try:
+            while not self.quit:
+                self.draw()
+                self.dump_state()
+                try:
+                    k = self.scr.get_wch()
+                except c.error:
+                    if self.decoder.pending and time.time() - self.decoder.since > 0.05:
+                        for ev in self.decoder.flush():
+                            self.event(ev)
                     continue
-                if self.busy:
-                    self.body.add("  (sedang bekerja; tunggu sampai selesai)", "dim")
-                    continue
-                break
-            if k == c.KEY_RESIZE:
-                continue
-            self.key(k)
+                except KeyboardInterrupt:
+                    if self.modal:
+                        self.modal["cancel"] = True
+                        self.modal["event"].set()
+                        continue
+                    if self.busy:
+                        self.body.add("  (sedang bekerja; tunggu sampai selesai)", "dim")
+                        continue
+                    break
+                self.handle(self._drain_keys(k))
+        finally:
+            self._term(MOUSE_OFF)
 
 
 def run(version):
