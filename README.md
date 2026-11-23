@@ -76,6 +76,7 @@ Replace `claude` with `codex` for Codex, or `all` for Claude Code + Codex + a zi
 | 🗂 | **Reference data** | Category tree, provinces and cities with area codes, KBLI codes, PPN rates |
 | 💾 | **Exports** | **XLSX, CSV, JSON, YAML** in an `output/` folder; the assistant asks for the format and location first |
 | 🛡 | **Polite networking** | About 1 request/second, bounded concurrency, automatic backoff on rate limits |
+| 🏬 | **Your own penyedia products** | List, add (clone as draft), update, bulk-update from CSV/XLSX and delete products in **your** penyedia.inaproc.id account through your own signed-in Safari (macOS) — every write is a dry run you approve, then `penyedia apply` |
 | 🕵️ | **Zero installs** | Chrome-style request headers, and a `discover` mode that drives your own Chrome to re-capture the API if the site changes |
 
 ### How it works
@@ -391,10 +392,15 @@ inaproc/
 ├── skills/inaproc/            ← the skill (this folder is what gets installed)
 │   ├── SKILL.md               ← instructions the assistant follows
 │   ├── scripts/inaproc.py     ← standard-library CLI
+│   ├── scripts/inaproc_chrome.py   ← Chrome DevTools client (discover)
+│   ├── scripts/inaproc_safari.py   ← your own Safari via AppleScript (penyedia)
+│   ├── scripts/inaproc_penyedia.py ← seller commands, plans, apply, write log
 │   ├── scripts/queries.json   ← the 22 public GraphQL operations
+│   ├── scripts/penyedia_queries.json ← the 11 seller product operations
 │   └── references/api.md      ← request format, variables, enums, fields
 ├── codex/prompts/inaproc.md   ← /prompts:inaproc for Codex
 ├── chatgpt/                   ← Custom GPT: instructions, OpenAPI action, queries
+├── tests/                     ← python3 -m unittest discover tests
 ├── install.sh · install.ps1   ← installers (macOS/Linux · Windows)
 └── LICENSE
 ```

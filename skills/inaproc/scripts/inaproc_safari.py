@@ -22,15 +22,17 @@ LIST_SCRIPT = [
     'set out to ""',
     'tell application "Safari"',
     '  repeat with w in (every window)',
+    '    set wid to id of w',
+    '    set us to {}',
+    '    try',
+    '      set us to URL of every tab of w',
+    '    end try',
     '    set i to 0',
-    '    repeat with t in (every tab of w)',
+    '    repeat with u in us',
     '      set i to i + 1',
-    '      set u to ""',
-    '      try',
-    '        set u to URL of t',
-    '      end try',
+    '      set u to contents of u',
     '      if u is missing value then set u to ""',
-    '      set out to out & (id of w) & sep & i & sep & u & linefeed',
+    '      set out to out & wid & sep & i & sep & u & linefeed',
     '    end repeat',
     '  end repeat',
     'end tell',
@@ -166,7 +168,8 @@ class SafariTab:
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                if not self.url().startswith("about:") and self.evaluate("document.readyState") == "complete":
+                st = self.evaluate("[location.href, document.readyState]")
+                if st and not str(st[0]).startswith("about:") and st[1] == "complete":
                     return True
             except SafariError as e:
                 if str(e) in (SETTING_HELP, AUTOMATION_HELP):

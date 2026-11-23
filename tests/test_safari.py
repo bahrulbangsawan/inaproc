@@ -69,6 +69,18 @@ class SafariTest(unittest.TestCase):
         self.assertIn("Allow JavaScript from Apple Events", str(cm.exception))
         self.assertIn("Developer Settings", str(cm.exception))
 
+    def test_wait_load_uses_one_page_call_and_no_tab_listing(self):
+        r = FakeRunner([("every tab", LIST),
+                        ("do JavaScript", json.dumps(["https://penyedia.inaproc.id/products", "complete"]))])
+        tab = sf.Safari(runner=r).find_tab("https://penyedia.inaproc.id")
+        before = len(r.calls)
+        self.assertTrue(tab.wait_load())
+        self.assertEqual(len(r.calls) - before, 1)
+        self.assertIn("do JavaScript", " ".join(r.calls[-1]))
+
+    def test_tab_listing_reads_urls_per_window_in_one_event(self):
+        self.assertTrue(any("URL of every tab of w" in l for l in sf.LIST_SCRIPT))
+
     def test_tab_gone_means_closed(self):
         r = FakeRunner([("every tab", LIST)])
         tab = sf.Safari(runner=r).find_tab("https://penyedia.inaproc.id")

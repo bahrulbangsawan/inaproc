@@ -78,6 +78,16 @@ class SessionInfoTest(unittest.TestCase):
     def test_empty_session_is_not_signed_in(self):
         self.assertFalse(ip.session_info(self._tab({"signedIn": False, "endpointStatus": 200}))["signedIn"])
 
+    def test_session_check_is_one_page_call_when_on_penyedia(self):
+        t = self._tab({"signedIn": True, "endpointStatus": 200, "href": "https://penyedia.inaproc.id/products"})
+        self.assertTrue(ip.session_info(t)["signedIn"])
+        t.url.assert_not_called()
+        t.navigate.assert_not_called()
+        self.assertEqual(t.evaluate.call_count, 1)
+
+    def test_session_js_reports_the_page_url(self):
+        self.assertIn("href:location.href", ip.SESSION_JS.replace(" ", ""))
+
     def test_login_check_never_navigates_away_from_the_login_page(self):
         for url in ("https://login-akun.inaproc.id/login?x=1", "https://penyedia.inaproc.id/auth/signin"):
             t = self._tab({"signedIn": False, "endpointStatus": 200}, url=url)

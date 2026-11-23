@@ -33,7 +33,7 @@ SESSION_JS = r"""(function(){
   var j=null; try{ j=JSON.parse(x.responseText); }catch(e){}
   var u=(j&&j.user)||{};
   var pick=function(){for(var i=0;i<arguments.length;i++){var v=arguments[i];if(v!==undefined&&v!==null&&v!==''&&typeof v!=='object')return String(v);}return null;};
-  return {signedIn: !!(j && (j.user || j.accessToken || j.expires)), endpointStatus: x.status,
+  return {signedIn: !!(j && (j.user || j.accessToken || j.expires)), endpointStatus: x.status, href:location.href,
           name: pick(u.name,u.fullName,u.fullname,u.username),
           company: pick(u.companyName,u.company&&u.company.name,u.company,u.sellerName,u.institutionName),
           expires: pick(j && j.expires)};
@@ -130,15 +130,18 @@ def session_info(tab, navigate=True):
 
     navigate=False is for `login`: while the owner is on the sign-in pages (another origin, or
     penyedia's /auth pages) the tab is left alone, and the check waits until the site sends it back."""
-    url = tab.url()
-    on_auth = (not url.startswith(PENYEDIA)) or urllib.parse.urlsplit(url).path.startswith("/auth")
-    if not navigate and on_auth:
-        return {"signedIn": False, "pending": True}
-    if not url.startswith(PENYEDIA):
+    if not navigate:
+        url = tab.url()
+        on_auth = (not url.startswith(PENYEDIA)) or urllib.parse.urlsplit(url).path.startswith("/auth")
+        if on_auth:
+            return {"signedIn": False, "pending": True}
+    info = tab.evaluate(SESSION_JS) or {"signedIn": False}
+    url = info.get("href") or tab.url()
+    if navigate and not url.startswith(PENYEDIA):
         tab.navigate(PENYEDIA + "/products")
         tab.wait_load(timeout=60)
-        url = tab.url()
-    info = tab.evaluate(SESSION_JS) or {"signedIn": False}
+        info = tab.evaluate(SESSION_JS) or {"signedIn": False}
+        url = info.get("href") or tab.url()
     if not info.get("signedIn") and info.get("endpointStatus") == 404:
         # No session endpoint answered: fall back to where the site sent the tab.
         info["signedIn"] = url.startswith(PENYEDIA) and "/auth" not in url and "login" not in url

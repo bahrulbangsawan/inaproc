@@ -1,7 +1,7 @@
 ---
 name: inaproc
-description: Search and analyse Indonesia's government e-catalogue INAPROC (katalog.inaproc.id, Katalog Elektronik LKPP), using public data only with no login. Use it to search products, open product details (price incl. PPN, variants, TKDN/BMP, PDN, specifications, stock), find the cheapest matching products, compare products side by side, build a RAB price comparison (perbandingan / pembanding harga) against the user's own company with at least two comparison products and their links, look up a seller/penyedia (profile, score, product list), read reviews, browse categories, look up regions or KBLI codes, and export any of it to JSON, CSV, XLSX or YAML. Use it whenever the user mentions INAPROC, e-katalog, katalog elektronik, LKPP, pengadaan or belanja pemerintah, a penyedia on the catalogue or a katalog.inaproc.id link, gives a RAB file with their company's catalogue link and asks for pembanding, or asks for the price ("harga") of goods or services government buyers can order, even if they don't name the site.
-compatibility: Python 3.8+ (standard library only) and network access to katalog.inaproc.id; `discover` and the `penyedia` seller commands also need a local Chrome, Chromium, Edge or Brave
+description: Search and analyse Indonesia's government e-catalogue INAPROC (katalog.inaproc.id, Katalog Elektronik LKPP) with public data, and manage the user's own seller (penyedia) products on penyedia.inaproc.id through their own signed-in browser (list, add, update, bulk-update, delete, always as a dry run first). Use it to search products, open product details (price incl. PPN, variants, TKDN/BMP, PDN, specifications, stock), find the cheapest matching products, compare products side by side, build a RAB price comparison (perbandingan / pembanding harga) against the user's own company with at least two comparison products and their links, look up a seller/penyedia (profile, score, product list), read reviews, browse categories, look up regions or KBLI codes, and export any of it to JSON, CSV, XLSX or YAML. Use it whenever the user mentions INAPROC, e-katalog, katalog elektronik, LKPP, pengadaan or belanja pemerintah, a penyedia on the catalogue or a katalog.inaproc.id link, gives a RAB file with their company's catalogue link and asks for pembanding, or asks for the price ("harga") of goods or services government buyers can order, even if they don't name the site.
+compatibility: Python 3.8+ (standard library only) and network access to katalog.inaproc.id; `discover` needs a local Chrome/Chromium/Edge/Brave; the `penyedia` seller commands need the user's own Safari on macOS (or that Chrome) and run only in Claude Code / Codex on the user's computer
 ---
 
 # INAPROC catalogue search
@@ -67,7 +67,8 @@ python3 <this-skill-dir>/scripts/inaproc.py <command> [options] [--save json,csv
 | `engine` | Show which HTTP engine and limits are in use | `engine` |
 | `read-xlsx <file>` | Read a local .xlsx (e.g. a RAB) without extra packages | `read-xlsx RAB.xlsx --sheet RAB` |
 | `rab-report <spec.json>` | Render a RAB comparison as the one-sheet "Perbandingan" workbook | `rab-report spec.json --verify --save xlsx --out-dir .` |
-| `discover` | Re-capture the site's API calls in a stealth browser (maintenance) | see below |
+| `discover` | Re-capture the site's API calls in your own Chrome window (maintenance) | see below |
+| `penyedia …` | The user's **own** seller account: login, status, products, product get/create/update/delete, bulk-update, apply | see "Seller (penyedia) commands" |
 
 Products are referenced by URL (`https://katalog.inaproc.id/<seller>/<slug>`) or by the short form `<seller>/<slug>`, which every search result includes.
 
@@ -103,6 +104,35 @@ Never invent or adjust a price, size or spec to make the company win; if a line 
 **"Seller" / "penyedia"**: run `seller` with the store slug or any of its product URLs. Add `--products N` for its best sellers. All of a seller's products are available with `search --seller-id <Seller ID> --pages N`. A null final score means the seller hasn't been scored yet; that isn't a bad score.
 
 **Budget or shortlist tasks** (e.g. "3 PDN laptops under Rp15jt with TKDN ≥ 40%"): combine `search` filters (`--label PDN --max-price 15000000 --type barang`), check TKDN in the results or with `--json`, then `compare` the shortlist. Exports suit these well: a `compare` saved as XLSX gives the buyer a ready worksheet.
+
+## Seller (penyedia) commands
+
+These act on the user's own penyedia.inaproc.id account through their own browser: on macOS their normal **Safari**
+(default), elsewhere the skill's Chrome profile (`--browser chrome`). The skill never sees, stores or types a password.
+
+**One-time setup (Safari):** Safari > Settings > Advanced > tick "Show features for web developers"; then Develop >
+Developer Settings… > tick "Allow JavaScript from Apple Events". Allow the macOS prompt for the terminal app to control
+Safari. Then the user signs in to https://penyedia.inaproc.id in Safari as usual (they tick Cloudflare themselves).
+
+| Command | What it does |
+|---|---|
+| `penyedia status` | Signed in? Prints name and session expiry (exit code 3 when not) |
+| `penyedia login` | Opens the page and waits while the user signs in |
+| `penyedia products [--search W] [--status S] [--page N] [--per-page N]` | The user's products (id, name, variants, price, stock, status, link); `--save` works |
+| `penyedia product get ID` | One product in full |
+| `penyedia product create --from ID --name "NEW NAME" [--price P] [--stock N] [--no-images] [--submit]` | **Dry run.** New product copied from one of theirs. Default saves a **draft** (no LKPP curation); `--submit` creates and submits it. Use `--no-images`: the site does not let a new product reuse another product's image files, so images are added in the site afterwards |
+| `penyedia product update ID [--price P] [--stock N] [--variant ID_OR_SKU] [--name N] [--set path=value]` | **Dry run** with a before/after table |
+| `penyedia product delete ID [ID …]` | **Dry run** listing what will be removed |
+| `penyedia bulk-update FILE.csv\|xlsx` | **Dry run** for many products (columns `id` plus `price`, `stock`, `name`, `variant`) |
+| `penyedia apply PLAN.json` | Sends exactly the writes in that plan, then logs them |
+| `penyedia record` | Maintenance: logs the site's own requests while the user works in the tab |
+
+**Rules for writes (never skip):**
+1. Every create/update/bulk-update/delete only writes a plan file to `~/.inaproc/penyedia/` and prints `penyedia apply <plan>`. Nothing is sent.
+2. Show the user the dry run (what changes, which products, links) and get an explicit yes **for that plan**. Never run `apply` on a plan the user has not seen; a new dry run means a new yes.
+3. `apply` re-reads each product first and skips it if it changed since the dry run; it stops at the first failure. Report what it printed, including any error text.
+4. Every sent write is appended to `~/.inaproc/penyedia/writes.log.jsonl` (tokens redacted).
+5. Only product operations exist; orders, negotiations and payments are refused by design.
 
 ## Reading the data correctly
 
