@@ -335,16 +335,36 @@ def progress(label):
             s.sub(label)
 
 
+def _input():
+    """input() where Ctrl-D (EOF) means "cancel", like Ctrl-C."""
+    try:
+        return input()
+    except EOFError:
+        raise KeyboardInterrupt
+
+
+def _flush_stdin():
+    """Drop anything typed ahead, so an earlier keystroke can't answer a later question."""
+    try:
+        import termios
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:  # noqa: BLE001 — not a terminal / not POSIX
+        pass
+
+
 def ask(prompt, default=None, secret=False, stream=None):
     stream = stream or sys.stdout
     st = Style(stream)
     hint = st.gray(f" [{default}]") if default not in (None, "") else ""
     text = st.paint("? ", "bold", "magenta") + st.bold(prompt) + hint + " "
     if secret:
-        value = getpass.getpass(ANSI.sub("", text) if not st.on else text)
+        try:
+            value = getpass.getpass(ANSI.sub("", text) if not st.on else text)
+        except EOFError:
+            raise KeyboardInterrupt
     else:
         print(text, end="", file=stream, flush=True)
-        value = input()
+        value = _input()
     value = value.strip()
     return value or (default if default is not None else "")
 
@@ -360,7 +380,7 @@ def choose(prompt, options, default=None, stream=None):
     while True:
         hint = f" [{default + 1}]" if default is not None else ""
         print(st.gray(f"  Pilih nomor{hint}: "), end="", file=stream, flush=True)
-        raw = input().strip()
+        raw = _input().strip()
         if not raw and default is not None:
             return default
         if raw.isdigit() and 1 <= int(raw) <= len(options):
@@ -368,15 +388,18 @@ def choose(prompt, options, default=None, stream=None):
         print(st.yellow(f"  Ketik angka 1–{len(options)}."), file=stream)
 
 
-def confirm(prompt, default=False, stream=None):
+def confirm(prompt, default=False, stream=None, flush=False):
+    """y/n question. Only an explicit y / ya / yes counts as yes. flush=True drops typed-ahead input first."""
     stream = stream or sys.stdout
     st = Style(stream)
+    if flush:
+        _flush_stdin()
     hint = "Y/n" if default else "y/N"
     print(st.paint("? ", "bold", "magenta") + st.bold(prompt) + st.gray(f" [{hint}] "), end="", file=stream, flush=True)
-    raw = input().strip().lower()
+    raw = _input().strip().lower()
     if not raw:
         return default
-    return raw in ("y", "ya", "yes", "iya", "ok", "oke")
+    return raw in ("y", "ya", "yes")
 
 
 def mask(secret):

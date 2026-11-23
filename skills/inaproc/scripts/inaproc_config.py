@@ -30,6 +30,14 @@ PROVIDERS = {
 SERVICE = "inaproc"
 
 
+class KeyStoreError(Exception):
+    exit_code = 1
+
+
+LOCKED = ("Keychain macOS terkunci atau tidak bisa dibuka dari sesi ini (misalnya lewat SSH). Buka kunci Mac Anda "
+          "lalu coba lagi, atau pakai variabel lingkungan API key untuk sesi ini.")
+
+
 def home():
     p = pathlib.Path(os.environ.get("INAPROC_HOME") or (pathlib.Path.home() / ".inaproc")).expanduser()
     p.mkdir(parents=True, exist_ok=True)
@@ -77,14 +85,22 @@ class KeyStore:
         except (OSError, ValueError):
             return {}
 
+    def _security(self, argv, **kw):
+        try:
+            p = self.run(argv, capture_output=True, text=True, timeout=30, **kw)
+        except subprocess.TimeoutExpired:
+            raise KeyStoreError(LOCKED)
+        if p.returncode != 0 and "interaction" in (p.stderr or "").lower():
+            raise KeyStoreError(LOCKED)
+        return p
+
     def get(self, provider):
         """(key, where it came from) or (None, None)."""
         env = PROVIDERS[provider]["env"]
         if os.environ.get(env):
             return os.environ[env], f"env {env}"
         if self.keychain:
-            p = self.run(["security", "find-generic-password", "-s", SERVICE, "-a", provider, "-w"],
-                         capture_output=True, text=True, timeout=10)
+            p = self._security(["security", "find-generic-password", "-s", SERVICE, "-a", provider, "-w"])
             if p.returncode == 0 and p.stdout.strip():
                 return p.stdout.strip(), "Keychain"
         key = self._file_data().get(provider)
@@ -94,7 +110,7 @@ class KeyStore:
         if self.keychain:
             cmd = (f"add-generic-password -U -s {shlex.quote(SERVICE)} -a {shlex.quote(provider)} "
                    f"-l {shlex.quote('inaproc ' + provider + ' API key')} -w {shlex.quote(key)}\n")
-            p = self.run(["security", "-i"], capture_output=True, text=True, timeout=10, input=cmd)
+            p = self._security(["security", "-i"], input=cmd)
             if p.returncode == 0:
                 return "Keychain"
         data = self._file_data()
@@ -104,8 +120,7 @@ class KeyStore:
 
     def delete(self, provider):
         if self.keychain:
-            self.run(["security", "delete-generic-password", "-s", SERVICE, "-a", provider],
-                     capture_output=True, text=True, timeout=10)
+            self._security(["security", "delete-generic-password", "-s", SERVICE, "-a", provider])
         data = self._file_data()
         if data.pop(provider, None) is not None:
             _write_private(self._file(), data)

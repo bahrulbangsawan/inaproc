@@ -14,7 +14,7 @@ Find products, the cheapest offers, seller scores and TKDN/PDN data on **[katalo
 [![Codex](https://img.shields.io/badge/Codex-skill-111111?logo=openai&logoColor=white)](#codex)
 [![ChatGPT](https://img.shields.io/badge/ChatGPT-GPT_Action-10A37F?logo=openai&logoColor=white)](#chatgpt)
 
-[**Quick start**](#-quick-start) · [**Features**](#-features) · [**Install**](#-installation) · [**Contoh prompt**](#-usage--contoh-prompt) · [**Penyedia**](#-your-own-penyedia-account) · [**Exports**](#-output-files) · [**CLI**](#-command-line-reference) · [**FAQ**](#-faq)
+[**Quick start**](#-quick-start) · [**Features**](#-features) · [**CLI + AI**](#-standalone-cli--ai-mode) · [**Install**](#-installation) · [**Contoh prompt**](#-usage--contoh-prompt) · [**Penyedia**](#-your-own-penyedia-account) · [**Exports**](#-output-files) · [**CLI**](#-command-line-reference) · [**FAQ**](#-faq)
 
 </div>
 
@@ -63,6 +63,51 @@ Replace `claude` with `codex` for Codex, or `all` for Claude Code + Codex + a zi
 
 ---
 
+## 🖥 Standalone CLI + AI mode
+
+No Claude Code or Claude Desktop needed: the installer also adds an **`inaproc`** command with a guided menu, a live view of every background step, and an **AI assistant that runs on your own API key** (Anthropic, OpenAI, OpenRouter or DeepSeek). The AI runs the searches, comparisons, RAB work and your penyedia tasks itself, then analyses the results for you.
+
+<!-- DEMO -->
+
+```bash
+inaproc                 # menu interaktif (logo, pilih nomor, tanpa hafal perintah)
+inaproc setup           # pilih provider AI, tempel API key (tersembunyi), pilih model
+inaproc ai              # ngobrol dengan asisten AI
+inaproc "bandingkan 3 kertas HVS A4 80 gram termurah yang PDN, mana yang paling layak?"
+inaproc doctor          # cek koneksi, Safari, login penyedia, API key — dengan langkah perbaikan
+```
+
+| Perintah | Fungsi |
+|---|---|
+| `inaproc` | Home screen with the ASCII logo, AI status and a numbered menu: search, cheapest, detail/compare, seller check, your products, KBLI categories, add/update/delete (via AI), RAB (via AI), account, login, setup, doctor |
+| `inaproc setup` | Wizard: choose the provider, paste the key (hidden input), the key is tested live, the model list comes from the provider. Keys go to the **macOS Keychain** (else `~/.inaproc/keys.json`, owner-only); `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` override |
+| `inaproc ai` · `inaproc ask "…"` · `inaproc "…"` | AI chat (REPL with `/baru`, `/model`, `/keluar`) or one question. The AI calls the inaproc commands as tools and shows each step live |
+| `inaproc whoami` | Penyedia account (via Safari), AI provider/model, masked key, version |
+| `inaproc login` | Opens penyedia.inaproc.id in Safari and waits while you sign in yourself |
+| `inaproc doctor` | Checks Python, the catalogue connection, Safari permission, penyedia login and the API key; shows step-by-step fixes and offers to open the right Safari / System Settings page |
+| `inaproc <command> …` | Every skill command (`search`, `cheapest`, `detail`, `compare`, `seller`, `penyedia …`, `rab-report` …), drawn as tables — or as cards with full links when a table is too wide. Piped output stays plain markdown; `--json` stays raw |
+
+**Contoh prompt untuk mode AI**
+
+| Kebutuhan | Ketik |
+|---|---|
+| Analisis harga | `inaproc "carikan laptop core i5 PDN di bawah 15 juta, bandingkan TKDN dan harganya"` |
+| Pilih yang paling layak | `inaproc "dari 5 kertas HVS A4 termurah, mana yang paling layak untuk instansi dan kenapa?"` |
+| Cek penyedia | `inaproc "seberapa bagus skor penyedia sinzo-mitra-sejati dan apa produk terlarisnya?"` |
+| RAB pembanding | `inaproc "ini RAB saya ./RAB.xlsx, link perusahaan saya <link>, carikan pembanding minimal 2, simpan xlsx"` |
+| Produk saya | `inaproc "produk saya mana yang stoknya di bawah 50?"` |
+| Kategori KBLI | `inaproc "ekspor kategori yang cocok dengan KBLI saya ke xlsx di folder ini"` |
+| Ubah produk | `inaproc "naikkan harga produk <id> jadi 600 ribu"` → dry run, lalu **terminal bertanya "Kirim perubahan ini sekarang? [y/N]"** |
+
+**Safety in AI mode**
+- The AI can read anything the skill can, but it **cannot send a product change by itself**: a write only makes a dry-run plan, and sending it goes through a tool where *the terminal* shows the plan and asks you `y/N`. `penyedia apply`, `update`, `login` and friends are blocked for the model.
+- Your API key never appears on screen (only `sk-ant-…1234`), in a command line, or in the AI's tool output. It is sent only to the provider you chose.
+- Usage is billed by your provider; every answer ends with the model name and token counts.
+
+**Safari not ready?** Any penyedia command that hits a missing permission shows a numbered guide (Safari ▸ Settings ▸ Advanced ▸ *Show features for web developers* → Develop ▸ Developer Settings ▸ *Allow JavaScript from Apple Events*, or System Settings ▸ Privacy & Security ▸ Automation), offers to open the right window, and retries when you press Enter.
+
+---
+
 ## 🧭 Features
 
 | | Feature | What you get |
@@ -107,6 +152,7 @@ The skill teaches the assistant *when* and *how* to use the catalogue, and the b
 | **Codex** CLI / IDE | **Python 3.8+** |
 | **Claude.ai / Claude Desktop** | Nothing. It runs in Claude's sandbox. Turn on code execution and allow network access to `katalog.inaproc.id`. |
 | **ChatGPT** | Nothing. It runs as a Custom GPT Action. |
+| **Standalone CLI** (`inaproc`, AI mode) | **Python 3.8+**; for AI mode an API key from Anthropic, OpenAI, OpenRouter or DeepSeek |
 | **Penyedia commands** (your own seller account) | Claude Code or Codex on **macOS** with **Safari** (one setting, see [below](#-your-own-penyedia-account)), or Chrome/Chromium on other systems. Not available on Claude.ai or ChatGPT, because they need your own signed-in browser. |
 
 No `pip install` is needed. The script, including its XLSX and YAML writers, uses only Python's standard library.
@@ -534,6 +580,10 @@ inaproc/
 │   ├── scripts/inaproc_safari.py   ← your own Safari via AppleScript (penyedia)
 │   ├── scripts/inaproc_penyedia.py ← seller commands, plans, apply, write log
 │   ├── scripts/inaproc_update.py   ← daily self-update from GitHub
+│   ├── scripts/inaproc_app.py      ← the standalone `inaproc` CLI (menu, setup, AI, doctor)
+│   ├── scripts/inaproc_ai.py       ← AI mode: Anthropic + OpenAI-compatible adapters, tools
+│   ├── scripts/inaproc_ui.py       ← logo, tables/cards, live steps, prompts
+│   ├── scripts/inaproc_config.py   ← providers, API keys (Keychain / private file)
 │   ├── version.json           ← the published version (auto-update reads it)
 │   ├── scripts/queries.json   ← the 22 public GraphQL operations
 │   ├── scripts/penyedia_queries.json ← the 11 seller product operations

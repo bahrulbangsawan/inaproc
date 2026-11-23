@@ -107,7 +107,7 @@ class ModelsTest(unittest.TestCase):
     def test_list_models(self):
         http = FakeHTTP([(200, {"data": [{"id": "claude-opus-5-5"}, {"id": "claude-haiku-5-5"}]})])
         self.assertEqual(ai.list_models("anthropic", "k", http=http), ["claude-opus-5-5", "claude-haiku-5-5"])
-        self.assertEqual(http.requests[0]["url"], "https://api.anthropic.com/v1/models")
+        self.assertTrue(http.requests[0]["url"].startswith("https://api.anthropic.com/v1/models?limit="))
         http = FakeHTTP([(200, {"data": [{"id": "deepseek-chat"}]})])
         self.assertEqual(ai.list_models("deepseek", "k", http=http), ["deepseek-chat"])
         self.assertEqual(http.requests[0]["url"], "https://api.deepseek.com/models")
@@ -140,11 +140,9 @@ class ToolRunnerTest(unittest.TestCase):
         self.assertEqual(ex.call_args[0][0], ["search", "kertas"])
 
     def test_apply_plan_needs_the_user_in_the_terminal(self):
-        pdir = os.path.join(self.tmp.name, "penyedia")
-        os.makedirs(pdir)
-        plan = os.path.join(pdir, "plan_1_delete.json")
-        json.dump({"version": 1, "kind": "delete", "account": "A", "writes": [
-            {"op": "deleteProduct", "summary": "DELETE Kotak"}]}, open(plan, "w"))
+        import inaproc_penyedia as ip
+        plan = str(ip.make_plan("delete", "A", [{"op": "deleteProduct", "variables": {"id": "p"}, "productId": "p",
+                                                 "beforeHash": "h", "summary": "DELETE Kotak"}]))
         ex = mock.Mock(return_value=(0, "1 done", ""))
         r = ai.ToolRunner(executor=ex, confirm=mock.Mock(return_value=False))
         text, err = r.run("apply_plan", {"plan": plan})

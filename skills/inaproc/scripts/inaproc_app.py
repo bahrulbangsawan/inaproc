@@ -191,41 +191,59 @@ def run_skill(argv, title=None):
         print(text.rstrip("\n") if want_raw else pretty(text))
     errors = err.getvalue()
     if errors.strip():
-        if code != 0 and show_guide(errors, retry=lambda: run_skill(argv, title) == 0):
+        guided = code != 0 and guide_for(errors) is not None
+        if guided and show_guide(errors, retry=lambda: run_skill(argv, title) == 0):
             return 0
         for line in errors.rstrip().splitlines():
+            if guided and line.startswith("error:"):
+                continue  # the guide above already explains it
             if line.startswith("error:"):
                 print(ui.Style(sys.stderr).red("✗ ") + line[6:].strip(), file=sys.stderr)
             elif line.strip():
                 print(ui.Style(sys.stderr).gray(line), file=sys.stderr)
-        if code != 0 and guide_for(errors):
-            g = guide_for(errors)
-            ui.panel(g[1], g[2], kind=g[0], stream=sys.stderr)
     return code
 
 
 # ----------------------------------------------------------------------------------------------- setup
-def _pick_model(provider, models):
+CHAT_EXCLUDE = re.compile(r"(moderation|embedding|audio|realtime|image|tts|transcribe|search|instruct|codex|-pro\b|"
+                          r"dall-e|whisper|babbage|davinci|computer-use|deep-research)", re.I)
+
+
+def _vkey(model_id):
+    return [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", model_id)]
+
+
+def model_choices(provider, models):
+    """Chat-capable models, the recommended one first."""
+    ids = [m for m in models if not CHAT_EXCLUDE.search(m)]
     default = cfg.PROVIDERS[provider]["default_model"]
-    ids = list(models)
     if provider == "openai":
-        ids = sorted([m for m in ids if m.startswith(("gpt-", "o")) and "audio" not in m and "realtime" not in m
-                      and "image" not in m and "tts" not in m and "transcribe" not in m and "search" not in m],
-                     reverse=True)
+        ids = sorted([m for m in ids if re.match(r"^(gpt-\d|gpt-4o|o\d)", m)], key=_vkey, reverse=True)
+        plain = [m for m in ids if re.match(r"^gpt-\d+(\.\d+)?$", m)]
+        if plain:
+            ids.remove(plain[0])
+            ids.insert(0, plain[0])
     elif provider == "openrouter":
-        pri = [m for m in ids if m.startswith(("anthropic/claude", "openai/gpt", "deepseek/", "google/gemini"))]
-        ids = sorted(pri, key=lambda m: (not m.startswith("anthropic/"), m))[:15]
+        opus = sorted([m for m in ids if m.startswith("anthropic/claude-opus")], key=_vkey, reverse=True)
+        others = [m for m in ids if m.startswith(("anthropic/claude", "openai/gpt", "deepseek/", "google/gemini"))
+                  and m not in opus]
+        ids = opus[:1] + sorted(others, key=_vkey, reverse=True)
     elif provider == "anthropic":
         ids = [m for m in ids if m.startswith("claude")]
-    if default and default in models and default in ids:
+    if default and default in ids:
         ids.remove(default)
-    if default and (default in models or not models):
         ids.insert(0, default)
-    ids = ids[:15]
-    labels = [m + ("  (disarankan)" if m == default else "") for m in ids] + ["Ketik nama model lain…"]
+    return ids[:15]
+
+
+def _pick_model(provider, models):
+    ids = model_choices(provider, models)
+    if not ids:
+        return ui.ask("Nama model (daftar dari provider kosong)") or (cfg.PROVIDERS[provider]["default_model"] or "")
+    labels = [m + ("  (disarankan)" if i == 0 else "") for i, m in enumerate(ids)] + ["Ketik nama model lain…"]
     i = ui.choose("Pilih model", labels, default=0)
     if i == len(ids):
-        return ui.ask("Nama model") or (default or "")
+        return ui.ask("Nama model") or ids[0]
     return ids[i]
 
 
@@ -234,6 +252,11 @@ def cmd_setup(args):
     st = ui.Style()
     current = _ai_settings() or {}
     names = list(cfg.PROVIDERS)
+    for flag in ("--provider", "--model"):
+        if flag in args and args.index(flag) + 1 >= len(args):
+            print(f"{flag} perlu nilai, mis.  inaproc setup {flag} {'anthropic' if flag == '--provider' else 'NAMA'}",
+                  file=sys.stderr)
+            return 2
     if "--provider" in args:
         provider = args[args.index("--provider") + 1]
         if provider not in cfg.PROVIDERS:
@@ -264,7 +287,7 @@ def cmd_setup(args):
     with ui.Steps() as steps:
         steps.start(f"Memeriksa API key ke {p['label']}")
         try:
-            models = ai.list_models(provider, key)
+            models = ai.verify_key(provider, key)
             steps.done(f"diterima · {len(models)} model tersedia")
         except ai.AIError as e:
             steps.fail(str(e))
@@ -273,8 +296,13 @@ def cmd_setup(args):
         model = args[args.index("--model") + 1]
     else:
         model = _pick_model(provider, models)
-    where = _store().set(provider, key) if key != existing else src
+    where = _store().set(provider, key) if key != existing or (src or "").startswith("env") else src
     cfg.save_settings({"provider": provider, "model": model})
+    env = p["env"]
+    if os.environ.get(env) and os.environ.get(env) != key:
+        ui.panel("Perhatian: variabel lingkungan menimpa key ini", [
+            f"{env} diset di shell Anda dan selalu dipakai lebih dulu daripada key yang baru disimpan.",
+            f"Hapus atau ganti {env} di ~/.zshrc (atau shell profile lain), lalu buka terminal baru."], kind="warn")
     ui.panel("Siap dipakai", [f"Provider : {p['label']}", f"Model    : {model}",
                               f"API key  : {ui.mask(key)}  ({where})", "",
                               "Coba:  inaproc ai", "       inaproc \"carikan kertas HVS A4 termurah dan bandingkan\""],
@@ -283,6 +311,27 @@ def cmd_setup(args):
 
 
 # ----------------------------------------------------------------------------------------------- AI
+def _plan_lines(doc):
+    """What each write in a plan will do, in words (shown before the user confirms)."""
+    lines = []
+    for w in doc.get("writes") or []:
+        op = w.get("op", "")
+        lines.append("• " + str(w.get("summary") or op))
+        if op in ("createProduct", "createProductDraft"):
+            inp = (w.get("variables") or {}).get("input") or {}
+            mode = "DIBUAT dan LANGSUNG DIKIRIM ke kurasi LKPP" if op == "createProduct" else "disimpan sebagai DRAFT"
+            lines.append(f"    mode: {mode}")
+            for v in (inp.get("variants") or [])[:5]:
+                lines.append(f"    varian: harga Rp{v.get('price')} · stok {v.get('stock')}" +
+                             (f" · {v.get('sku')}" if v.get("sku") else ""))
+            lines.append(f"    kategori: {(inp.get('category') or {}).get('id')} · gambar: {len(inp.get('images') or [])}")
+        for path, old, new in (w.get("diff") or [])[:15]:
+            lines.append(f"    {path}: {json.dumps(old, ensure_ascii=False)} → {json.dumps(new, ensure_ascii=False)}")
+        if len(w.get("diff") or []) > 15:
+            lines.append(f"    … {len(w['diff']) - 15} perubahan lain (lihat file rencana)")
+    return lines
+
+
 def _confirm_plan_factory(get_steps):
     def confirm(doc, path):
         s = get_steps()
@@ -290,15 +339,14 @@ def _confirm_plan_factory(get_steps):
             s.done("menunggu persetujuan Anda")
         writes = doc.get("writes") or []
         lines = [f"Akun     : {doc.get('account')}", f"Jenis    : {doc.get('kind')}  ·  {len(writes)} perubahan", ""]
-        lines += [f"• {w.get('summary')}" for w in writes[:12]]
-        if len(writes) > 12:
-            lines.append(f"… dan {len(writes) - 12} lagi (lihat file rencana)")
+        body = _plan_lines(doc)
+        lines += body[:60] + ([f"… (lihat file rencana untuk sisanya)"] if len(body) > 60 else [])
         lines += ["", f"Rencana: {path}"]
         ui.panel("AI ingin mengirim perubahan ke penyedia.inaproc.id", lines, kind="warn")
         if not _interactive():
             print("Tidak ada terminal interaktif untuk konfirmasi; tidak ada yang dikirim.", file=sys.stderr)
             return False
-        return ui.confirm("Kirim perubahan ini sekarang?", default=False)
+        return ui.confirm(f"Kirim {len(writes)} perubahan ini sekarang? (ketik y)", default=False, flush=True)
     return confirm
 
 
@@ -346,8 +394,9 @@ def _answer(agent, holder, question):
             steps.done()
     print()
     print(pretty(answer))
-    print(ui.Style().gray(f"\n  {agent.model} · {agent.usage['input']:,} token masuk · "
-                          f"{agent.usage['output']:,} token keluar").replace(",", "."))
+    u = agent.last_usage
+    print(ui.Style().gray(f"\n  {agent.model} · jawaban ini: {u['input']:,} token masuk · "
+                          f"{u['output']:,} token keluar").replace(",", "."))
     return 0
 
 
@@ -360,9 +409,21 @@ def run_ask(question):
     return _answer(agent, holder, question)
 
 
+AI_HELP = """inaproc ai            obrolan dengan asisten AI (/baru, /model, /keluar)
+inaproc ai "…"        satu pertanyaan (sama dengan: inaproc ask "…" atau inaproc "…")
+Atur provider, API key dan model dengan:  inaproc setup"""
+
+
 def cmd_ai(args):
+    if args and args[0] in ("-h", "--help"):
+        print(AI_HELP)
+        return 0
     if args:
         return run_ask(" ".join(args))
+    try:
+        import readline  # noqa: F401 — arrow keys and history in the chat prompt
+    except ImportError:
+        pass
     holder = {}
     agent, problem = _make_agent(holder)
     if not agent:
@@ -382,7 +443,8 @@ def cmd_ai(args):
     while True:
         try:
             print()
-            q = input(st.paint("❯ ", "bold", "magenta")).strip()
+            prompt = st.paint("❯ ", "bold", "magenta")
+            q = input(re.sub(r"(\x1b\[[0-9;]*m)", "\001\\1\002", prompt)).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -697,8 +759,15 @@ def main(argv=None):
             return cmd_login(rest)
         if head == "doctor":
             return cmd_doctor(rest)
-        if head.startswith("-") or head in _skill_commands():
+        commands = _skill_commands()
+        if head.startswith("-") or head in commands:
             return run_skill(argv)
+        import difflib
+        near = difflib.get_close_matches(head, sorted(commands | APP_COMMANDS), n=1, cutoff=0.75)
+        if near and len(argv) <= 3:
+            print(ui.Style().yellow(f"“{head}” bukan perintah inaproc.") + f" Maksud Anda:  inaproc {near[0]} "
+                  + " ".join(rest))
+            return 2
         # Anything else is a question in plain language.
         if _ai_settings() and _key_for(_ai_settings()["provider"])[0]:
             return run_ask(" ".join(argv))
@@ -708,6 +777,11 @@ def main(argv=None):
     except KeyboardInterrupt:
         print(ui.Style().yellow("\nDibatalkan."))
         return 130
+    except Exception as e:  # noqa: BLE001 — known errors (Keychain, AI, Chrome, Safari) print as one line
+        if getattr(e, "exit_code", None) is None:
+            raise
+        print(ui.Style(sys.stderr).red("✗ ") + str(e), file=sys.stderr)
+        return e.exit_code
     finally:
         if argv and argv[0] in ("setup", "ai", "chat", "ask", "whoami", "login", "doctor"):
             try:

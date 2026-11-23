@@ -53,17 +53,24 @@ smoke() {  # $1 = installed skill folder
 install_launcher() {  # $1 = installed skill folder: puts the `inaproc` command on PATH
   BIN="${INAPROC_BIN:-$HOME/.local/bin}"
   mkdir -p "$BIN"
-  cat > "$BIN/inaproc" <<LAUNCH
-#!/bin/sh
-# inaproc standalone CLI (installed by install.sh). The skill folder updates itself; this file just points at it.
-exec "$PY" "$1/scripts/inaproc_app.py" "\$@"
-LAUNCH
+  dir="$(cd "$1" && pwd)"                      # absolute, so the command works from any folder
+  q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\''/g")"; }   # single-quote for sh
+  {
+    echo '#!/bin/sh'
+    echo '# inaproc standalone CLI (installed by install.sh). The skill folder updates itself; this file points at it.'
+    echo "exec $(q "$PY") $(q "$dir/scripts/inaproc_app.py") \"\$@\""
+  } > "$BIN/inaproc"
   chmod +x "$BIN/inaproc"
   say "Command: $BIN/inaproc  →  type 'inaproc' (menu), 'inaproc setup' (AI), 'inaproc help'"
   case ":$PATH:" in
     *":$BIN:"*) ;;
-    *) echo "  $BIN is not on your PATH yet. Add it once:"
-       echo "    echo 'export PATH=\"$BIN:\$PATH\"' >> ~/.zshrc && source ~/.zshrc" ;;
+    *) case "${SHELL##*/}" in
+         zsh)  rc="$HOME/.zshrc" ;;
+         bash) if [ "$(uname)" = Darwin ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi ;;
+         *)    rc="$HOME/.profile" ;;
+       esac
+       echo "  $BIN is not on your PATH yet. Add it once, then open a new terminal:"
+       echo "    echo 'export PATH=\"$BIN:\$PATH\"' >> $rc" ;;
   esac
 }
 
