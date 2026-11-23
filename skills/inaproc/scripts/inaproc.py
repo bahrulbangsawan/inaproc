@@ -35,8 +35,13 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor
 from xml.sax.saxutils import escape as _xml_escape
 
+# Run as a script, this file is __main__; register it as `inaproc` too so the helper modules beside it
+# (inaproc_penyedia) share these classes instead of importing a second copy.
+sys.modules.setdefault("inaproc", sys.modules[__name__])
+
 ENDPOINT = "https://katalog.inaproc.id/graphql"
 SITE = "https://katalog.inaproc.id"
+VERSION = "1.1.0"
 CHROME_MAJOR = 158  # keep User-Agent and sec-ch-ua on the same Chrome version
 MIN_INTERVAL_FLOOR = 0.5   # never faster than 2 request starts per second, whatever the flags say
 MAX_CONCURRENCY = 4
@@ -931,7 +936,7 @@ def cmd_ops(a):
 
 
 def cmd_engine(a):
-    print(json.dumps({"engine": CLIENT.engine, "minInterval": CLIENT.limiter.interval,
+    print(json.dumps({"version": VERSION, "engine": CLIENT.engine, "minInterval": CLIENT.limiter.interval,
                       "concurrency": CLIENT.concurrency, "proxy": bool(CLIENT.proxy)}, indent=2))
 
 
@@ -1556,7 +1561,9 @@ def build_parser():
                    help=f"seconds between request starts (floor {MIN_INTERVAL_FLOOR})")
     n.add_argument("--concurrency", type=int, default=2, help=f"parallel requests, 1–{MAX_CONCURRENCY}")
 
-    p = argparse.ArgumentParser(prog="inaproc", description="Search katalog.inaproc.id (public data, no login).")
+    p = argparse.ArgumentParser(prog="inaproc", description="Search katalog.inaproc.id (public data, no login), "
+                                "and manage your own penyedia products (`penyedia`).")
+    p.add_argument("--version", action="version", version=f"inaproc {VERSION}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def add(name, fn, help_):
@@ -1649,6 +1656,9 @@ def build_parser():
     s.add_argument("--verify", action="store_true",
                    help="re-read every product URL on the catalogue (1 call per unique URL) and flag stale prices")
 
+    import inaproc_penyedia
+    inaproc_penyedia.add_parsers(sub, common)
+
     add("ops", cmd_ops, "list bundled public operations")
     add("engine", cmd_engine, "show which HTTP engine and settings will be used")
 
@@ -1694,13 +1704,19 @@ def main(argv=None):
     for w in compat_warnings(args):
         print(f"warning: {w}", file=sys.stderr)
     try:
-        offline = args.cmd in ("ops", "discover", "read-xlsx") or (args.cmd == "rab-report" and not args.verify)
+        offline = args.cmd in ("ops", "discover", "read-xlsx", "penyedia") or (args.cmd == "rab-report" and not args.verify)
         if not offline:
             CLIENT = Client(proxy=args.proxy, min_interval=args.min_interval, concurrency=args.concurrency)
         args.fn(args)
     except InaprocError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    except Exception as e:
+        code = getattr(e, "exit_code", None)
+        if code is None and type(e).__name__ != "ChromeError":
+            raise
+        print(f"error: {e}", file=sys.stderr)
+        return code or 1
     finally:
         if CLIENT:
             CLIENT.close()
