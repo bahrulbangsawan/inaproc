@@ -459,6 +459,126 @@ def cmd_record(a):
     print(table(["Operation / endpoint", "Method", "Count", "HTTP"], rec.summary()))
 
 
+# ----------------------------------------------------------------------------- seller GraphQL client
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "penyedia_queries.json"), encoding="utf-8") as _f:
+    ALLOWED_OPS = json.load(_f)  # the only seller operations this tool will ever send
+
+ROOT_FIELD = {"getListProduct": "listProduct", "getProductById": "getProduct",
+              "checkProductNameAvailability": "checkProductNameAvailability",
+              "getAllProductCategoryListSeller": "getAllProductCategory",
+              "requestUploadSignedUrl": "requestUploadSignedUrl", "createProduct": "createProduct",
+              "createProductDraft": "createProductDraft", "updateProduct": "updateProduct",
+              "updateProductDraft": "updateProductDraft", "deleteProduct": "deleteProduct",
+              "updateProductActiveStatus": "updateProductActiveStatus"}
+
+
+class SellerClient:
+    """GraphQL calls to penyedia.inaproc.id, sent from inside the owner's signed-in tab, one at a time."""
+
+    def __init__(self, tab, limiter=None):
+        from inaproc import RateLimiter
+        self.tab = tab
+        self.limiter = limiter or RateLimiter(1.0)
+
+    def gql(self, op, variables):
+        InaprocError = _err()
+        if op not in ALLOWED_OPS:
+            raise InaprocError(f"{op} is not a product operation this tool may send")
+        body = json.dumps({"operationName": op, "query": ALLOWED_OPS[op], "variables": variables})
+        for attempt in range(3):
+            self.limiter.wait()
+            r = self.tab.page_fetch(GRAPHQL, "POST", {"content-type": "application/json",
+                                                      "accept": "application/json"}, body)
+            status, text = r.get("status"), r.get("text") or ""
+            if status in (429, 502, 503, 504) and attempt < 2:
+                time.sleep(5 * (attempt + 1) ** 2)
+                continue
+            break
+        if status in (401, 403):
+            raise NotSignedIn("penyedia.inaproc.id refused the call (signed out?); run `penyedia login`")
+        try:
+            doc = json.loads(text)
+        except ValueError:
+            raise InaprocError(f"{op}: HTTP {status}, not JSON: {text[:200]}")
+        if doc.get("errors"):
+            msgs = "; ".join(e.get("message", "?") for e in doc["errors"])
+            if any("unauth" in m.lower() or "login" in m.lower() for m in msgs.split("; ")):
+                raise NotSignedIn(f"{op}: {msgs}; run `penyedia login`")
+            raise InaprocError(f"{op}: {msgs}")
+        data = (doc.get("data") or {}).get(ROOT_FIELD[op])
+        items = data if isinstance(data, list) else [data]
+        for d in items:
+            if isinstance(d, dict) and d.get("__typename") == "GenericError":
+                raise InaprocError(f"{op}: {d.get('code')}: {d.get('message')} (reqId {d.get('reqId')})")
+        return data
+
+    def list_products(self, page=1, per_page=20, filter=None):
+        return self.gql("getListProduct", {"page": page, "perPage": per_page, "filter": filter or {}})
+
+    def get_product(self, product_id):
+        return self.gql("getProductById", {"id": str(product_id)})
+
+
+def product_link(p):
+    return f"https://katalog.inaproc.id/{p.get('username')}/{p.get('slug')}" if p.get("slug") else None
+
+
+def product_rows(items):
+    rows = []
+    for p in items or []:
+        pr = p.get("prices") or {}
+        rows.append({"id": p.get("id"), "name": p.get("name"), "variants": len(p.get("variants") or []),
+                     "minPrice": pr.get("minPrice"), "maxPrice": pr.get("maxPrice"),
+                     "stock": p.get("stockAccumulation"), "status": p.get("status"), "link": product_link(p)})
+    return rows
+
+
+def _client(a):
+    from inaproc import RateLimiter
+    b, tab = open_penyedia(browser=a.browser, chrome_path=a.chrome_path, headed=True)
+    return b, SellerClient(tab, RateLimiter(max(1.0, a.min_interval)))
+
+
+def _money(v):
+    return "" if v is None else f"Rp{float(v):,.0f}".replace(",", ".")
+
+
+def cmd_products(a):
+    from inaproc import emit, table
+    b, c = _client(a)
+    try:
+        flt = json.loads(a.filter) if a.filter else {}
+        res = c.list_products(page=a.page, per_page=a.per_page, filter=flt)
+    finally:
+        b.close()
+    rows = product_rows(res.get("items"))
+    if a.search:
+        q = a.search.lower()
+        rows = [r for r in rows if q in (r["name"] or "").lower()]
+    if a.status:
+        rows = [r for r in rows if (r["status"] or "").upper() == a.status.upper()]
+    md = (f"**Your products** — page {res.get('currentPage')} of {res.get('lastPage')}, "
+          f"{len(rows)} shown of {res.get('total')} total\n\n"
+          + table(["ID", "Name", "Variants", "Price", "Stock", "Status", "Link"],
+                  [[r["id"], r["name"], r["variants"],
+                    _money(r["minPrice"]) + ("" if r["maxPrice"] in (None, r["minPrice"]) else "–" + _money(r["maxPrice"])),
+                    r["stock"], r["status"], r["link"]] for r in rows]))
+    emit(a, "penyedia-products", a.search or "all", {"page": res.get("currentPage"), "lastPage": res.get("lastPage"),
+                                                     "total": res.get("total"), "items": rows}, md, {"products": rows})
+
+
+def cmd_product_get(a):
+    from inaproc import emit
+    b, c = _client(a)
+    try:
+        p = c.get_product(a.id)
+    finally:
+        b.close()
+    md = (f"**{p.get('name')}** (id {p.get('id')}, status {p.get('status')})\n\n```json\n"
+          + json.dumps(p, ensure_ascii=False, indent=2) + "\n```")
+    emit(a, "penyedia-product", str(a.id), p, md, {"product": [p]})
+
+
 # ----------------------------------------------------------------------------- CLI wiring
 def add_parsers(sub, common):
     p = sub.add_parser("penyedia", help="your own seller account on penyedia.inaproc.id (local Chrome needed)")
@@ -477,6 +597,14 @@ def add_parsers(sub, common):
     s = add("status", cmd_status, "are you signed in? (exit code 3 when not)")
     s.add_argument("--headless", action="store_true", help="no window (may be refused by Cloudflare)")
     add("logout", cmd_logout, "clear the *.inaproc.id session from the skill's Chrome profile")
+    s = add("products", cmd_products, "list your products")
+    s.add_argument("--page", type=int, default=1)
+    s.add_argument("--per-page", type=int, default=20)
+    s.add_argument("--search", help="only names containing this text (on the fetched page)")
+    s.add_argument("--status", help="only this status, e.g. ACTIVE")
+    s.add_argument("--filter", help="raw ListProductFilterInput JSON passed to the site")
+    s = add("product", cmd_product_get, "show one of your products in full")
+    s.add_argument("id")
     s = add("record", cmd_record, "record the site's API calls while you work in the window")
     s.add_argument("--duration", type=float, help="stop after this many minutes (default: when the window closes)")
     return p
