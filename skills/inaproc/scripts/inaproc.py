@@ -37,7 +37,7 @@ from xml.sax.saxutils import escape as _xml_escape
 
 ENDPOINT = "https://katalog.inaproc.id/graphql"
 SITE = "https://katalog.inaproc.id"
-CHROME_MAJOR = 142  # keep User-Agent and sec-ch-ua on the same Chrome version
+CHROME_MAJOR = 158  # keep User-Agent and sec-ch-ua on the same Chrome version
 MIN_INTERVAL_FLOOR = 0.5   # never faster than 2 request starts per second, whatever the flags say
 MAX_CONCURRENCY = 4
 HERE = os.path.dirname(os.path.abspath(__file__))
