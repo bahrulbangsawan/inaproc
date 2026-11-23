@@ -76,7 +76,7 @@ Replace `claude` with `codex` for Codex, or `all` for Claude Code + Codex + a zi
 | 🗂 | **Reference data** | Category tree, provinces and cities with area codes, KBLI codes, PPN rates |
 | 💾 | **Exports** | **XLSX, CSV, JSON, YAML** in an `output/` folder; the assistant asks for the format and location first |
 | 🛡 | **Polite networking** | About 1 request/second, bounded concurrency, automatic backoff on rate limits |
-| 🏬 | **Your own penyedia products** | List, add (clone as draft), update, bulk-update from CSV/XLSX and delete products in **your** penyedia.inaproc.id account through your own signed-in Safari (macOS) — every write is a dry run you approve, then `penyedia apply` |
+| 🏬 | **Your own penyedia products** | List, eligible categories for your KBLI, add (clone as draft), update, bulk-update from CSV/XLSX and delete products in **your** penyedia.inaproc.id account through your own signed-in Safari (macOS) — every write is a dry run you approve, then `penyedia apply` |
 | 🕵️ | **Zero installs** | Chrome-style request headers, and a `discover` mode that drives your own Chrome to re-capture the API if the site changes |
 
 ### How it works

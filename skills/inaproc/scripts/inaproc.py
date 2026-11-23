@@ -324,9 +324,9 @@ def cell(v, width=60):
     return s if len(s) <= width else s[: width - 1] + "…"
 
 
-def table(headers, rows):
+def table(headers, rows, width=60):
     out = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
-    out += ["| " + " | ".join(cell(c) for c in r) + " |" for r in rows]
+    out += ["| " + " | ".join(cell(c, width) for c in r) + " |" for r in rows]
     return "\n".join(out)
 
 

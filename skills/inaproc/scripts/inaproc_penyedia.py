@@ -473,7 +473,9 @@ ROOT_FIELD = {"getListProduct": "listProduct", "getProductById": "getProduct",
               "requestUploadSignedUrl": "requestUploadSignedUrl", "createProduct": "createProduct",
               "createProductDraft": "createProductDraft", "updateProduct": "updateProduct",
               "updateProductDraft": "updateProductDraft", "deleteProduct": "deleteProduct",
-              "updateProductActiveStatus": "updateProductActiveStatus"}
+              "updateProductActiveStatus": "updateProductActiveStatus",
+              "getAllProductCategoryListSearch": "allMinifiedProductCategory", "kbliByInstutionId": "getInstitutionByID"}
+CATEGORY_BATCH = 50
 
 
 class SellerClient:
@@ -528,6 +530,59 @@ class SellerClient:
 
     def get_product(self, product_id):
         return self.gql("getProductById", {"id": str(product_id)})
+
+    def category_tree(self):
+        return (self.gql("getAllProductCategoryListSearch", {"input": {}}) or {}).get("items") or []
+
+    def category_kbli(self, ids):
+        """{category id: {kbli, kbliCodes, isActive}} via read-only aliased getProductCategory lookups, 50 a request."""
+        out = {}
+        fields = "... on ProductCategory{id kbli kbliCodes{code version} isActive}"
+        for start in range(0, len(ids), CATEGORY_BATCH):
+            chunk = ids[start:start + CATEGORY_BATCH]
+            q = "query CategoryKbliBatch{" + " ".join(
+                f"c{i}:getProductCategory(id:{json.dumps(str(cid))}){{{fields}}}" for i, cid in enumerate(chunk)) + "}"
+            self.limiter.wait()
+            r = self.tab.page_fetch(GRAPHQL, "POST", {"content-type": "application/json", "accept": "application/json"},
+                                    json.dumps({"operationName": "CategoryKbliBatch", "query": q}))
+            if r.get("status") in (401, 403):
+                raise NotSignedIn("penyedia.inaproc.id refused the call (signed out?); run `penyedia login`")
+            try:
+                data = json.loads(r.get("text") or "").get("data") or {}
+            except ValueError:
+                raise _err()(f"category lookup: HTTP {r.get('status')}")
+            for i, cid in enumerate(chunk):
+                d = data.get(f"c{i}") or {}
+                out[cid] = {"kbli": d.get("kbli"), "kbliCodes": d.get("kbliCodes"), "isActive": d.get("isActive")}
+        return out
+
+    def company_kbli(self, seller_id):
+        inst = self.gql("kbliByInstutionId", {"id": seller_id}) or {}
+        seen, out = set(), []
+        for proj in ((inst.get("company") or {}).get("oss") or {}).get("project") or []:
+            for k in proj.get("kbli") or []:
+                key = (k.get("kbli"), k.get("versi"))
+                if k.get("kbli") and key not in seen:
+                    seen.add(key)
+                    out.append({"code": k["kbli"], "name": k.get("name"), "version": k.get("versi")})
+        return out
+
+    def seller_id(self):
+        path = ic.private_dir("penyedia") / "account.json"
+        try:
+            with open(path, encoding="utf-8") as f:
+                sid = json.load(f).get("sellerId")
+            if sid:
+                return sid
+        except (OSError, ValueError):
+            pass
+        items = (self.list_products(page=1, per_page=1) or {}).get("items") or []
+        if not items:
+            raise _err()("could not find your seller id (no products yet); pass --seller-id")
+        sid = self.get_product(items[0]["id"]).get("sellerId")
+        if sid:
+            write_private_json(path, {"sellerId": sid})
+        return sid
 
     def name_available(self, name):
         r = self.gql("checkProductNameAvailability", {"name": name, "productID": None})
@@ -832,6 +887,84 @@ def bulk_writes(client, rows):
     return writes, skipped, invalid
 
 
+# ----------------------------------------------------------------------------- categories eligible for the KBLI
+def kbli_eligible(category_kbli, seller_codes):
+    """The site's own rule (penyedia bundle, module 22350 `Np`): no KBLI list -> any KBLI will do;
+    otherwise one of the category's codes must be among the company's codes."""
+    if category_kbli is None:
+        return len(seller_codes) > 0
+    return any(code in seller_codes for code in category_kbli)
+
+
+def leaf_categories(items):
+    out = []
+
+    def walk(node, path):
+        kids = node.get("children") or []
+        here = path + [node.get("name") or ""]
+        if not kids:
+            out.append({"id": node.get("id"), "path": " > ".join(here), "productType": node.get("productType")})
+        for k in kids:
+            walk(k, here)
+
+    for it in items:
+        walk(it, [])
+    return out
+
+
+def _category_cache(client, refresh):
+    path = ic.private_dir("cache") / "penyedia_category_kbli.json"
+    if not refresh and path.exists() and time.time() - path.stat().st_mtime < 7 * 86400:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f), True
+    leaves = leaf_categories(client.category_tree())
+    kb = client.category_kbli([c["id"] for c in leaves])
+    for c in leaves:
+        c.update(kb.get(c["id"]) or {})
+    write_private_json(path, leaves)
+    return leaves, False
+
+
+TYPE_NAMES = {"PHYSICAL": "barang", "SERVICE": "jasa", "DIGITAL": "digital"}
+
+
+def cmd_categories(a):
+    from inaproc import emit, table
+    b, c = _client(a)
+    try:
+        seller = a.seller_id or c.seller_id()
+        company = c.company_kbli(seller)
+        cats, cached = _category_cache(c, a.refresh)
+    finally:
+        b.close()
+    codes = {k["code"] for k in company}
+    rows = []
+    for cat in cats:
+        if cat.get("isActive") is False:
+            continue
+        ok = kbli_eligible(cat.get("kbli"), codes)
+        if not (ok or a.all):
+            continue
+        if a.type and TYPE_NAMES.get(cat.get("productType")) != a.type:
+            continue
+        if a.search and a.search.lower() not in cat["path"].lower():
+            continue
+        match = sorted(codes & set(cat.get("kbli") or [])) if cat.get("kbli") is not None else ["(any)"]
+        rows.append({"id": cat["id"], "category": cat["path"], "type": TYPE_NAMES.get(cat.get("productType"), ""),
+                     "eligible": ok, "matchingKbli": ", ".join(match), "categoryKbli": ", ".join(cat.get("kbli") or [])})
+    total = sum(1 for cat in cats if cat.get("isActive") is not False)
+    n_ok = sum(1 for cat in cats if cat.get("isActive") is not False and kbli_eligible(cat.get("kbli"), codes))
+    head = (f"**Categories you can list in** — {n_ok} of {total} active categories match your KBLI "
+            f"({', '.join(sorted(codes)) or 'none'})" + (" · from cache (`--refresh` to re-read)" if cached else ""))
+    cols = ["Category", "Type", "Your matching KBLI", "ID"] + (["Eligible"] if a.all else [])
+    md = head + f"\n\n{len(rows)} shown\n\n" + table(cols, [[r["category"], r["type"], r["matchingKbli"], r["id"]]
+                                                       + (["yes" if r["eligible"] else "no"] if a.all else [])
+                                                       for r in rows], width=200)
+    emit(a, "penyedia-categories", a.search or ("all" if a.all else "eligible"),
+         {"companyKbli": company, "eligibleCount": n_ok, "total": total, "items": rows}, md,
+         {"categories": rows, "company_kbli": company})
+
+
 def product_link(p):
     return f"https://katalog.inaproc.id/{p.get('username')}/{p.get('slug')}" if p.get("slug") else None
 
@@ -1077,6 +1210,12 @@ def add_parsers(sub, common):
     s.add_argument("--set", action="append", help="dotted.path=value on the update input (repeatable)")
     s = padd("delete", cmd_delete, "dry run: delete one or more of your products")
     s.add_argument("ids", nargs="+")
+    s = add("categories", cmd_categories, "categories your company's KBLI allows (as the add-product form checks)")
+    s.add_argument("--search", help="only categories whose path contains this text")
+    s.add_argument("--type", choices=["barang", "jasa", "digital"])
+    s.add_argument("--all", action="store_true", help="also list the categories you are not eligible for")
+    s.add_argument("--refresh", action="store_true", help="re-read the category KBLI list (cached 7 days)")
+    s.add_argument("--seller-id", help="your institution/seller id (default: read from one of your products)")
     s = add("bulk-update", cmd_bulk, "dry run: update many products from a CSV/XLSX (columns id, price, stock, …)")
     s.add_argument("file")
     s = add("apply", cmd_apply, "send exactly the writes in a plan file (only after you approved it)")
