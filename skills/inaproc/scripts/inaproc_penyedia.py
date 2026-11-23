@@ -903,7 +903,8 @@ def leaf_categories(items):
         kids = node.get("children") or []
         here = path + [node.get("name") or ""]
         if not kids:
-            out.append({"id": node.get("id"), "path": " > ".join(here), "productType": node.get("productType")})
+            out.append({"id": node.get("id"), "path": " > ".join(here), "levels": here,
+                        "productType": node.get("productType")})
         for k in kids:
             walk(k, here)
 
@@ -950,19 +951,42 @@ def cmd_categories(a):
         if a.search and a.search.lower() not in cat["path"].lower():
             continue
         match = sorted(codes & set(cat.get("kbli") or [])) if cat.get("kbli") is not None else ["(any)"]
-        rows.append({"id": cat["id"], "category": cat["path"], "type": TYPE_NAMES.get(cat.get("productType"), ""),
+        levels = (cat.get("levels") or cat["path"].split(" > ")) + ["", ""]
+        rows.append({"level1": levels[0], "level2": levels[1], "level3": " > ".join(x for x in levels[2:] if x),
+                     "id": cat["id"], "category": cat["path"], "type": TYPE_NAMES.get(cat.get("productType"), ""),
                      "eligible": ok, "matchingKbli": ", ".join(match), "categoryKbli": ", ".join(cat.get("kbli") or [])})
     total = sum(1 for cat in cats if cat.get("isActive") is not False)
     n_ok = sum(1 for cat in cats if cat.get("isActive") is not False and kbli_eligible(cat.get("kbli"), codes))
     head = (f"**Categories you can list in** — {n_ok} of {total} active categories match your KBLI "
             f"({', '.join(sorted(codes)) or 'none'})" + (" · from cache (`--refresh` to re-read)" if cached else ""))
-    cols = ["Category", "Type", "Your matching KBLI", "ID"] + (["Eligible"] if a.all else [])
-    md = head + f"\n\n{len(rows)} shown\n\n" + table(cols, [[r["category"], r["type"], r["matchingKbli"], r["id"]]
-                                                       + (["yes" if r["eligible"] else "no"] if a.all else [])
-                                                       for r in rows], width=200)
+    cols = ["Level 1", "Level 2", "Level 3", "Type", "Your matching KBLI", "ID"] + (["Eligible"] if a.all else [])
+    md = head + f"\n\n{len(rows)} shown\n\n" + table(
+        cols, [[r["level1"], r["level2"], r["level3"], r["type"], r["matchingKbli"], r["id"]]
+               + (["yes" if r["eligible"] else "no"] if a.all else []) for r in rows], width=120)
     emit(a, "penyedia-categories", a.search or ("all" if a.all else "eligible"),
-         {"companyKbli": company, "eligibleCount": n_ok, "total": total, "items": rows}, md,
-         {"categories": rows, "company_kbli": company})
+         {"companyKbli": company, "eligibleCount": n_ok, "total": total, "items": rows, "tree": category_tree_of(rows)},
+         md, {"categories": rows, "company_kbli": company})
+
+
+def category_tree_of(rows):
+    """Level 1 > Level 2 > Level 3 nesting of category rows (for JSON/YAML)."""
+    tree, l1s = [], {}
+    for r in rows:
+        n1 = l1s.get(r["level1"])
+        if n1 is None:
+            n1 = l1s[r["level1"]] = {"name": r["level1"], "children": [], "_l2": {}}
+            tree.append(n1)
+        n2 = n1["_l2"].get(r["level2"])
+        if n2 is None:
+            n2 = n1["_l2"][r["level2"]] = {"name": r["level2"], "children": []}
+            n1["children"].append(n2)
+        leaf = {"name": r["level3"], "id": r["id"], "type": r["type"], "matchingKbli": r["matchingKbli"]}
+        if "eligible" in r:
+            leaf["eligible"] = r["eligible"]
+        n2["children"].append(leaf)
+    for n1 in tree:
+        n1.pop("_l2")
+    return tree
 
 
 def product_link(p):

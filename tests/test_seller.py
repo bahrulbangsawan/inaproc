@@ -122,6 +122,7 @@ class CategoryTest(unittest.TestCase):
     def test_leaf_categories_with_paths(self):
         leaves = ip.leaf_categories(TREE["allMinifiedProductCategory"]["items"])
         self.assertEqual(leaves[0], {"id": "C1", "path": "Perlengkapan Alat Tulis > Peralatan Surat > Peralatan Surat Lainnya",
+                                     "levels": ["Perlengkapan Alat Tulis", "Peralatan Surat", "Peralatan Surat Lainnya"],
                                      "productType": "PHYSICAL"})
         self.assertEqual(len(leaves), 4)
 
@@ -172,6 +173,52 @@ class SellerIdCacheTest(unittest.TestCase):
             n = len(tab.calls)
             self.assertEqual(fast_client(tab).seller_id(), "S9")
             self.assertEqual(len(tab.calls), n)
+
+
+class CategoryExportTest(unittest.TestCase):
+    def _run(self, extra, d):
+        import os
+        tab = BatchTab({"getAllProductCategoryListSearch": TREE, "kbliByInstutionId": COMPANY})
+        with mock.patch.dict(os.environ, {"INAPROC_HOME": d}), \
+                mock.patch.object(ip, "open_penyedia", return_value=(mock.MagicMock(), tab)), \
+                mock.patch.object(ip, "session_info", return_value={"signedIn": True}):
+            return run_main(["penyedia", "categories", "--seller-id", "S1"] + extra)
+
+    def test_rows_have_three_levels_and_json_has_a_tree(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            code, out, err = self._run(["--json"], d)
+        self.assertEqual(code, 0, err)
+        doc = json.loads(out)
+        row = doc["items"][0]
+        self.assertEqual((row["level1"], row["level2"], row["level3"]),
+                         ("Perlengkapan Alat Tulis", "Peralatan Surat", "Peralatan Surat Lainnya"))
+        self.assertEqual(doc["tree"][0]["name"], "Perlengkapan Alat Tulis")
+        self.assertEqual(doc["tree"][0]["children"][0]["name"], "Peralatan Surat")
+        self.assertEqual(doc["tree"][0]["children"][0]["children"][0]["name"], "Peralatan Surat Lainnya")
+        self.assertEqual(doc["tree"][0]["children"][0]["children"][0]["matchingKbli"], "18111")
+
+    def test_markdown_groups_by_level(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            code, out, err = self._run([], d)
+        self.assertEqual(code, 0, err)
+        self.assertIn("| Level 1 | Level 2 | Level 3 |", out)
+
+    def test_saves_every_format(self):
+        import os, tempfile, zipfile
+        with tempfile.TemporaryDirectory() as d:
+            code, out, err = self._run(["--save", "json,csv,xlsx,yaml", "--out-dir", d], d)
+            self.assertEqual(code, 0, err)
+            files = sorted(os.listdir(os.path.join(d, "output")))
+            self.assertEqual({f.rsplit(".", 1)[1] for f in files}, {"csv", "json", "xlsx", "yaml"})
+            cat_csv = [f for f in files if f.endswith("__categories.csv")][0]
+            csv_text = open(os.path.join(d, "output", cat_csv), encoding="utf-8-sig").read()
+            self.assertIn("level1,level2,level3", csv_text.splitlines()[0].replace(" ", ""))
+            self.assertIn("Peralatan Surat Lainnya", csv_text)
+            x = [f for f in files if f.endswith(".xlsx")][0]
+            with zipfile.ZipFile(os.path.join(d, "output", x)) as z:
+                self.assertTrue(any("sheet" in n for n in z.namelist()))
 
 
 class ProductsCommandTest(unittest.TestCase):
