@@ -131,9 +131,9 @@ class PlansTest(PlanTestBase):
         ip.apply_plan(c, self._delete_plan(c))
         ip.apply_plan(c, self._delete_plan(c))
         log = os.path.join(self.tmp.name, "penyedia", "writes.log.jsonl")
-        lines = open(log).read().splitlines()
-        self.assertEqual(len(lines), 2)
-        entry = json.loads(lines[0])
+        lines = [json.loads(l) for l in open(log).read().splitlines()]
+        self.assertEqual([l["result"] for l in lines], ["sending", "done", "sending", "done"])
+        entry = lines[1]
         self.assertEqual(entry["op"], "deleteProduct")
         self.assertEqual(entry["productId"], "p1")
         self.assertEqual(entry["result"], "done")
@@ -145,7 +145,7 @@ class PlansTest(PlanTestBase):
                          kind="create")
         ip.apply_plan(c, path)
         log = os.path.join(self.tmp.name, "penyedia", "writes.log.jsonl")
-        self.assertEqual(json.loads(open(log).read().splitlines()[0])["response"]["jwtToken"], R)
+        self.assertEqual(json.loads(open(log).read().splitlines()[-1])["response"]["jwtToken"], R)
 
 
 if __name__ == "__main__":

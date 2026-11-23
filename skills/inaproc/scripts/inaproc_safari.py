@@ -9,6 +9,7 @@ JavaScript is always handed to osascript as an argument, never spliced into the 
 import json
 import subprocess
 import time
+import urllib.parse
 
 SETTING_HELP = ("Safari blocks scripts from the terminal until you allow it: Safari > Settings > Advanced > tick "
                 "\"Show features for web developers\", then in the menu bar Develop > Developer Settings… > tick "
@@ -54,12 +55,22 @@ OPEN_SCRIPT = ['on run argv',
                'else',
                'tell front window to set current tab to (make new tab with properties {URL:(item 1 of argv)})',
                'end if',
+               'set w to front window',
+               'return ((id of w) as text) & (ASCII character 9) & ((index of current tab of w) as text)',
                'end tell',
                'end run']
 
 
 class SafariError(Exception):
-    pass
+    exit_code = 1  # printed as a plain error by inaproc.main, never a traceback
+
+
+def _matches(url, prefix):
+    """Same scheme and exact host as `prefix`, and the path starts with its path."""
+    u, p = urllib.parse.urlsplit(url or ""), urllib.parse.urlsplit(prefix or "")
+    if not prefix:
+        return True
+    return u.scheme == p.scheme and u.hostname == p.hostname and u.path.startswith(p.path or "")
 
 
 def _osascript(lines, args, runner, timeout=120):
@@ -105,26 +116,19 @@ class Safari:
         return rows
 
     def tabs(self, url_prefix=""):
-        return [SafariTab(self, w, i) for w, i, u in self._list() if u.startswith(url_prefix)]
+        return [SafariTab(self, w, i) for w, i, u in self._list() if _matches(u, url_prefix)]
 
     def find_tab(self, url_prefix):
         t = self.tabs(url_prefix)
         return t[0] if t else None
 
     def new_tab(self, url):
-        _osascript(OPEN_SCRIPT, [url], self.runner)
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            rows = self._list()
-            for w, i, u in rows:
-                if u.startswith(url.split("?")[0]) or u == url:
-                    return SafariTab(self, w, i)
-            time.sleep(0.3)
-        # Safari may already have redirected (e.g. to a sign-in page): take the front window's current tab.
-        rows = self._list()
-        if rows:
-            return SafariTab(self, rows[0][0], rows[0][1])
-        raise SafariError("could not find the Safari tab that was just opened")
+        out = _osascript(OPEN_SCRIPT, [url], self.runner)
+        try:
+            wid, idx = out.strip().split("\t")
+            return SafariTab(self, int(wid), int(idx))
+        except ValueError:
+            raise SafariError(f"could not find the Safari tab that was just opened ({out[:80]!r})")
 
     def close(self):
         pass  # the owner's Safari stays as it is
@@ -152,14 +156,18 @@ class SafariTab:
 
     def evaluate(self, js, await_promise=False, timeout=120):
         """Run a synchronous JavaScript expression in the tab and return its JSON value."""
-        wrapped = "JSON.stringify((function(){return (" + js + ");})())"
+        wrapped = ("(function(){try{return JSON.stringify((function(){return (" + js + ");})());}"
+                   "catch(e){return JSON.stringify({__inaprocError:String(e)});}})()")
         out = _osascript(JS_SCRIPT, [wrapped, self.index, self.window_id], self.safari.runner, timeout=timeout)
         if out in ("", "missing value"):
             return None
         try:
-            return json.loads(out)
+            value = json.loads(out)
         except ValueError:
             raise SafariError(f"unexpected answer from Safari: {out[:200]}")
+        if isinstance(value, dict) and "__inaprocError" in value:
+            raise SafariError(f"page script failed: {value['__inaprocError']}")
+        return value
 
     def navigate(self, url):
         _osascript(NAV_SCRIPT, [url, self.index, self.window_id], self.safari.runner)
@@ -179,12 +187,14 @@ class SafariTab:
 
     def page_fetch(self, url, method="POST", headers=None, body=None, timeout=120):
         """Synchronous same-origin XMLHttpRequest inside the tab -> {status, headers, text}."""
-        js = ("(function(){var x=new XMLHttpRequest();x.open(%s,%s,false);x.withCredentials=true;"
+        origin = "{0.scheme}://{0.netloc}".format(urllib.parse.urlsplit(url))
+        js = ("(function(){if(location.origin!==%s){throw new Error('wrong tab: '+location.origin);}"
+              "var x=new XMLHttpRequest();x.open(%s,%s,false);x.withCredentials=true;"
               "var h=%s;for(var k in h){x.setRequestHeader(k,h[k]);}x.send(%s);var rh={};"
               "x.getAllResponseHeaders().trim().split(/[\\r\\n]+/).forEach(function(l){var i=l.indexOf(':');"
               "if(i>0){rh[l.slice(0,i).trim().toLowerCase()]=l.slice(i+1).trim();}});"
               "return {status:x.status,headers:rh,text:x.responseText};})()"
-              % (json.dumps(method), json.dumps(url), json.dumps(headers or {}),
+              % (json.dumps(origin), json.dumps(method), json.dumps(url), json.dumps(headers or {}),
                  "null" if body is None else json.dumps(body)))
         return self.evaluate(js, timeout=timeout)
 

@@ -27,6 +27,7 @@ LOGOUT_ORIGINS = [PENYEDIA, "https://daftar-akun.inaproc.id", "https://login-aku
 # Runs inside a penyedia page (synchronous, so it works in Chrome and Safari alike). Returns only what the
 # CLI prints: never the raw session, which may hold tokens.
 SESSION_JS = r"""(function(){
+ if(location.origin!=='https://penyedia.inaproc.id'){return {signedIn:false, wrongOrigin:true, href:location.href};}
  try{
   var x=new XMLHttpRequest(); x.open('GET','/api/auth/session',false); x.setRequestHeader('accept','application/json');
   x.send(null);
@@ -104,6 +105,11 @@ def _stamp():
 
 
 # ----------------------------------------------------------------------------- browser + session
+def on_penyedia(url):
+    u = urllib.parse.urlsplit(url or "")
+    return u.scheme == "https" and u.hostname == "penyedia.inaproc.id"
+
+
 def default_browser():
     return os.environ.get("INAPROC_BROWSER") or ("safari" if platform.system() == "Darwin" else "chrome")
 
@@ -119,7 +125,7 @@ def open_penyedia(headed=True, keep_open=False, chrome_path=None, path="/product
         tab.wait_load(timeout=60)
         return sf, tab
     b = ic.Browser.start("chrome-penyedia", headed=headed, chrome_path=chrome_path, keep_open=keep_open)
-    tabs = [t for t in b.tabs(PENYEDIA)]
+    tabs = [t for t in b.tabs(PENYEDIA) if on_penyedia(t.url())]
     tab = tabs[0] if tabs else b.new_tab(PENYEDIA + path)
     tab.wait_load(timeout=60)
     return b, tab
@@ -132,19 +138,19 @@ def session_info(tab, navigate=True):
     penyedia's /auth pages) the tab is left alone, and the check waits until the site sends it back."""
     if not navigate:
         url = tab.url()
-        on_auth = (not url.startswith(PENYEDIA)) or urllib.parse.urlsplit(url).path.startswith("/auth")
+        on_auth = (not on_penyedia(url)) or urllib.parse.urlsplit(url).path.startswith("/auth")
         if on_auth:
             return {"signedIn": False, "pending": True}
     info = tab.evaluate(SESSION_JS) or {"signedIn": False}
     url = info.get("href") or tab.url()
-    if navigate and not url.startswith(PENYEDIA):
+    if navigate and not on_penyedia(url):
         tab.navigate(PENYEDIA + "/products")
         tab.wait_load(timeout=60)
         info = tab.evaluate(SESSION_JS) or {"signedIn": False}
         url = info.get("href") or tab.url()
     if not info.get("signedIn") and info.get("endpointStatus") == 404:
         # No session endpoint answered: fall back to where the site sent the tab.
-        info["signedIn"] = url.startswith(PENYEDIA) and "/auth" not in url and "login" not in url
+        info["signedIn"] = on_penyedia(url) and "/auth" not in url and "login" not in url
     return info
 
 
@@ -166,7 +172,10 @@ def cmd_login(a):
                 raise _err()("the login window was closed before signing in")
             try:
                 info = session_info(tab, navigate=False)
-            except ic.ChromeError:
+            except Exception as e:  # page mid-load; Safari setup problems still stop the command
+                if type(e).__name__ not in ("ChromeError", "SafariError") or "Allow JavaScript" in str(e) \
+                        or "control Safari" in str(e):
+                    raise
                 info = {"signedIn": False}
             if info.get("signedIn"):
                 print(_session_line(info))
@@ -476,6 +485,9 @@ ROOT_FIELD = {"getListProduct": "listProduct", "getProductById": "getProduct",
               "updateProductActiveStatus": "updateProductActiveStatus",
               "getAllProductCategoryListSearch": "allMinifiedProductCategory", "kbliByInstutionId": "getInstitutionByID"}
 CATEGORY_BATCH = 50
+WRITE_OPS = {"createProduct", "createProductDraft", "updateProduct", "updateProductDraft", "deleteProduct",
+             "updateProductActiveStatus"}
+NEEDS_BEFORE_HASH = {"updateProduct", "updateProductDraft", "deleteProduct", "updateProductActiveStatus"}
 
 
 class SellerClient:
@@ -491,12 +503,14 @@ class SellerClient:
         if op not in ALLOWED_OPS:
             raise InaprocError(f"{op} is not a product operation this tool may send")
         body = json.dumps({"operationName": op, "query": ALLOWED_OPS[op], "variables": variables})
+        # A 502/503/504 on a write may still have reached the origin: retrying could create duplicates.
+        retry_on = (429,) if op in WRITE_OPS else (429, 502, 503, 504)
         for attempt in range(3):
             self.limiter.wait()
             r = self.tab.page_fetch(GRAPHQL, "POST", {"content-type": "application/json",
-                                                      "accept": "application/json"}, body)
+                                                      "accept": "application/json"}, body) or {}
             status, text = r.get("status"), r.get("text") or ""
-            if status in (429, 502, 503, 504) and attempt < 2:
+            if status in retry_on and attempt < 2:
                 time.sleep(5 * (attempt + 1) ** 2)
                 continue
             break
@@ -511,11 +525,17 @@ class SellerClient:
             if any("unauth" in m.lower() or "login" in m.lower() for m in msgs.split("; ")):
                 raise NotSignedIn(f"{op}: {msgs}; run `penyedia login`")
             raise InaprocError(f"{op}: {msgs}")
+        if status != 200:
+            raise InaprocError(f"{op}: HTTP {status}: {text[:200]}")
         data = (doc.get("data") or {}).get(ROOT_FIELD[op])
         items = data if isinstance(data, list) else [data]
         for d in items:
             if isinstance(d, dict) and d.get("__typename") == "GenericError":
                 raise InaprocError(f"{op}: {d.get('code')}: {d.get('message')} (reqId {d.get('reqId')})")
+        if op in WRITE_OPS and not (isinstance(data, dict) and (
+                data.get("id") or data.get("__typename") in ("Product", "StatusResponse"))):
+            raise InaprocError(f"{op}: the site returned no result ({json.dumps(data)[:120]}); check "
+                               "`penyedia products` before trying again")
         return data
 
     def account(self):
@@ -610,9 +630,31 @@ def diff(before, after, path=""):
     return [] if before == after else [(path, before, after)]
 
 
+def _plan_key():
+    path = ic.private_dir("penyedia") / ".plan_key"
+    if not path.exists():
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(os.urandom(32))
+    return path.read_bytes()
+
+
+def _plan_digest(plan):
+    import hmac
+    body = json.dumps({"kind": plan.get("kind"), "account": plan.get("account"), "writes": plan.get("writes")},
+                      sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+    return hmac.new(_plan_key(), body, hashlib.sha256).hexdigest()
+
+
 def make_plan(kind, account, writes):
+    if not account or account == "unknown":
+        raise _err()("could not tell which account is signed in; refusing to make a plan")
+    for w in writes:
+        if w["op"] in NEEDS_BEFORE_HASH and not w.get("beforeHash"):
+            raise _err()(f"{w['op']} needs the product's state at dry-run time")
     plan = {"version": 1, "kind": kind, "account": account,
             "createdAt": _dt.datetime.now().astimezone().isoformat(timespec="seconds"), "writes": writes}
+    plan["digest"] = _plan_digest(plan)
     path = ic.private_dir("penyedia") / f"plan_{_stamp()}_{kind}.json"
     n = 1
     while path.exists():
@@ -637,12 +679,24 @@ def apply_plan(client, path, continue_on_error=False):
         plan = json.load(f)
     if plan.get("version") != 1 or not isinstance(plan.get("writes"), list):
         raise InaprocError(f"{path} is not a plan file made by this tool")
+    import hmac
+    if not hmac.compare_digest(str(plan.get("digest", "")), _plan_digest(plan)):
+        raise InaprocError("this plan was changed after the dry run (or was not made on this computer); "
+                           "nothing was sent. Make a new dry run.")
+    if plan.get("appliedAt"):
+        raise InaprocError(f"this plan was already applied at {plan['appliedAt']}; nothing was sent. "
+                           "Make a new dry run if you want to send it again.")
+    for w in plan["writes"]:
+        if w.get("op") in NEEDS_BEFORE_HASH and not w.get("beforeHash"):
+            raise InaprocError(f"{w.get('op')} in this plan has no dry-run state to check against; nothing was sent")
     account = client.account()  # raises NotSignedIn before anything is sent
     if plan.get("account") != account:
         raise InaprocError(f"this plan was made for {plan.get('account')!r}, but the signed-in account is "
                            f"{account!r}; nothing was sent")
     res = {"done": 0, "failed": 0, "skipped": 0, "notRun": 0, "results": []}
     stop = False
+    plan["appliedAt"] = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    write_private_json(path, plan)  # marked before sending: a plan is never sent twice
     for w in plan["writes"]:
         row = {"op": w["op"], "productId": w.get("productId"), "summary": w.get("summary")}
         res["results"].append(row)
@@ -662,6 +716,8 @@ def apply_plan(client, path, continue_on_error=False):
         entry = {"time": _dt.datetime.now().astimezone().isoformat(timespec="seconds"), "plan": str(path),
                  "account": account, "op": w["op"], "productId": w.get("productId"),
                  "variables": redact(w.get("variables"))}
+        _log_write(dict(entry, result="sending"))
+        interrupted = False
         try:
             response = client.gql(w["op"], w.get("variables") or {})
             row["result"] = "done"
@@ -673,7 +729,22 @@ def apply_plan(client, path, continue_on_error=False):
             res["failed"] += 1
             entry.update(result="failed", error=str(e))
             stop = not continue_on_error
+        except (Exception, KeyboardInterrupt) as e:
+            interrupted = isinstance(e, KeyboardInterrupt)
+            msg = "interrupted" if interrupted else str(e)
+            row["result"] = (f"failed (outcome unknown: {msg}); check `penyedia products` before making "
+                             "a new plan")
+            res["failed"] += 1
+            entry.update(result="failed (outcome unknown)", error=msg)
+            stop = True
+        entry["time"] = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
         _log_write(entry)
+        if interrupted:
+            for rest in plan["writes"][len(res["results"]):]:
+                res["results"].append({"op": rest["op"], "productId": rest.get("productId"),
+                                       "summary": rest.get("summary"), "result": "not run (interrupted)"})
+                res["notRun"] += 1
+            break
     return res
 
 
@@ -745,10 +816,10 @@ def _common_input(p, keep_ids):
                         "optionLevel": o.get("optionLevel"), "values": o.get("values") or [],
                         "valueIds": o.get("valueIds") if keep_ids else None})
             for o in p["productOptions"]],
-        "variants": [_drop_none({"id": v.get("id") if keep_ids else None}) | {
+        "variants": [dict(_drop_none({"id": v.get("id") if keep_ids else None}), **{
             "price": v.get("price") or 0, "sku": v.get("sku") or "", "stock": v.get("stock") or 0,
             "options": v.get("options"), "optionValues": v.get("optionValues"),
-            "isActive": v.get("isActive", True) is not False, "imageUrl": v.get("imageUrl") or ""}
+            "isActive": v.get("isActive", True) is not False, "imageUrl": v.get("imageUrl") or ""})
             for v in p.get("variants") or []],
         "prices": {"minPurchase": prices.get("minPurchase") or 1, "productWholesalePrices": [
             _drop_none({"id": w.get("id") if keep_ids else None, "minQuantity": w.get("minQuantity") or 0,
@@ -790,6 +861,12 @@ def _parse_amount(v, what):
 
 
 def _apply_variant_changes(inp, product, changes):
+    for vc in changes.get("variantChanges") or []:
+        _apply_one_variant_change(inp, product, vc)
+    _apply_one_variant_change(inp, product, changes)
+
+
+def _apply_one_variant_change(inp, product, changes):
     price, stock = changes.get("price"), changes.get("stock")
     if price is None and stock is None:
         return
@@ -863,27 +940,45 @@ def update_writes(client, pid, changes):
 
 
 def bulk_writes(client, rows):
-    """rows: dicts with id plus any of price, stock, name, variant. Returns (writes, skipped, invalid)."""
+    """rows: dicts with id plus any of price, stock, name, variant. Rows for the same product (e.g. one per
+    variant) are merged into one update. Returns (writes, skipped, invalid)."""
     writes, skipped, invalid = [], [], []
+    groups, order = {}, []
     for n, row in enumerate(rows, 1):
         row = {str(k).strip().lower(): ("" if v is None else str(v).strip()) for k, v in row.items()}
         pid = row.get("id")
         if not pid:
             invalid.append(f"row {n}: no id")
             continue
-        changes = {k: row[k] for k in ("price", "stock", "name", "variant") if row.get(k)}
         try:
             for k in ("price", "stock"):
-                if k in changes:
-                    _parse_amount(changes[k], k)
-            w, _, _ = update_writes(client, pid, changes)
+                if row.get(k):
+                    _parse_amount(row[k], k)
         except _err() as e:
             invalid.append(f"row {n} ({pid}): {e}")
+            continue
+        if pid not in groups:
+            groups[pid] = {"rows": [], "changes": {"variantChanges": []}}
+            order.append(pid)
+        g = groups[pid]
+        g["rows"].append(n)
+        if row.get("name"):
+            g["changes"]["name"] = row["name"]
+        vc = {k: row[k] for k in ("price", "stock", "variant") if row.get(k)}
+        if vc.get("price") or vc.get("stock"):
+            g["changes"]["variantChanges"].append(vc)
+    for pid in order:
+        g = groups[pid]
+        label = "row " + ",".join(map(str, g["rows"]))
+        try:
+            w, _, _ = update_writes(client, pid, g["changes"])
+        except _err() as e:
+            invalid.append(f"{label} ({pid}): {e}")
             continue
         if w:
             writes += w
         else:
-            skipped.append(f"row {n} ({pid}): no change")
+            skipped.append(f"{label} ({pid}): no change")
     return writes, skipped, invalid
 
 
@@ -1083,6 +1178,8 @@ def cmd_create(a):
                  f"- Category: {(inp.get('category') or {}).get('id')}",
                  f"- Variants: {len(v)}; first price {_money(v[0].get('price'))}, stock {v[0].get('stock')}",
                  f"- Images: {len(inp.get('images') or [])}"]
+        lines += ["", "Full payload that `apply` will send:", "```json",
+                  json.dumps(inp, ensure_ascii=False, indent=2), "```"]
         _save_plan_and_tell(c, "create", [{"op": op, "variables": {"input": inp}, "summary": f"CREATE {name}"}],
                             lines)
     finally:
@@ -1109,7 +1206,8 @@ def cmd_update(a):
             return
         lines = [f"**Dry run: update {p.get('name')}** ({product_link(p) or a.id})", "",
                  table(["Field", "Now", "After"], [[k, json.dumps(o, ensure_ascii=False), json.dumps(n, ensure_ascii=False)]
-                                                  for k, o, n in changed])]
+                                                  for k, o, n in changed]),
+                 "", "Full payload: in the plan file below (every other field is sent as the site has it now)."]
         _save_plan_and_tell(c, "update", writes, lines)
     finally:
         b.close()
@@ -1180,7 +1278,7 @@ def cmd_apply(a):
 
 # ----------------------------------------------------------------------------- CLI wiring
 def add_parsers(sub, common):
-    p = sub.add_parser("penyedia", help="your own seller account on penyedia.inaproc.id (local Chrome needed)")
+    p = sub.add_parser("penyedia", help="your own seller account on penyedia.inaproc.id (your Safari, or Chrome)")
     ps = p.add_subparsers(dest="penyedia_cmd", required=True)
 
     def add(name, fn, help_):
@@ -1191,7 +1289,7 @@ def add_parsers(sub, common):
         s.add_argument("--chrome-path", help="Chrome/Chromium/Edge/Brave binary (default: found automatically)")
         return s
 
-    s = add("login", cmd_login, "open a Chrome window and wait while you sign in yourself")
+    s = add("login", cmd_login, "open penyedia in your browser and wait while you sign in yourself")
     s.add_argument("--timeout", type=float, default=600, help="seconds to wait for the sign-in (default 600)")
     s = add("status", cmd_status, "are you signed in? (exit code 3 when not)")
     s.add_argument("--headless", action="store_true", help="no window (may be refused by Cloudflare)")
